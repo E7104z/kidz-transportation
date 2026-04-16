@@ -16,16 +16,32 @@ const EVENT_DISPLAY: Record<string, { label: string; color: string; bg: string; 
 };
 
 const LiveTracking: React.FC = () => {
-  const { loading, bookings, students, todayLogs, driverLocations } = useParentContext();
+  const { loading, bookings, students, todayLogs, driverLocations, driverBookingMap } = useParentContext();
 
   const activeBookings = bookings.filter(b => b.status === 'active');
 
   // Collect driver locations as array for the map
   const driverLocationsList = useMemo(() => Object.values(driverLocations), [driverLocations]);
 
+  // Only show GPS to parent when their student is actually in the vehicle:
+  // driver location is visible if at least one of the parent's students has
+  // status 'picked_up' (not yet 'dropped_off') in today's log.
+  const visibleDriverLocations = useMemo(() => {
+    return driverLocationsList.filter(loc => {
+      const bookingId = driverBookingMap[loc.driverId];
+      if (!bookingId) return false;
+      const log = todayLogs[bookingId];
+      if (!log || log.ran !== true) return false;
+      const booking = bookings.find(b => b.id === bookingId);
+      if (!booking) return false;
+      const events = (log.studentEvents ?? {}) as Record<string, { status: string }>;
+      return booking.studentIds.some(sid => events[sid]?.status === 'picked_up');
+    });
+  }, [driverLocationsList, driverBookingMap, todayLogs, bookings]);
+
   // Calculate "last updated" for freshness indicator
   const lastUpdated = useMemo(() => {
-    const locs = Object.values(driverLocations);
+    const locs = visibleDriverLocations;
     if (locs.length === 0) return null;
     const latest = locs.reduce((best, loc) => {
       const ts = loc.updatedAt && typeof (loc.updatedAt as any).toDate === 'function'
@@ -59,7 +75,7 @@ const LiveTracking: React.FC = () => {
           <p className="text-slate-500 text-sm mt-1">{format(new Date(), 'EEEE, MMMM d')} &middot; Real-time activity</p>
         </div>
         <div className="flex items-center gap-2 text-xs text-slate-400">
-          {driverLocationsList.length > 0 ? (
+          {visibleDriverLocations.length > 0 ? (
             <>
               <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
               <span className="text-emerald-600 font-medium">GPS Active</span>
@@ -75,14 +91,14 @@ const LiveTracking: React.FC = () => {
       </div>
 
       {/* ── Real-time map ── */}
-      {driverLocationsList.length > 0 && (
+      {visibleDriverLocations.length > 0 && (
         <div>
           <div className="flex items-center gap-2 mb-2">
             <Satellite size={14} className="text-blue-600" />
             <span className="text-sm font-semibold text-slate-700">Driver Location</span>
           </div>
           <DriverMapView
-            driverLocations={driverLocationsList}
+            driverLocations={visibleDriverLocations}
             height="280px"
           />
         </div>
