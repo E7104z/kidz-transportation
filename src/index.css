@@ -1,0 +1,68 @@
+﻿@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* ── Print styles ──────────────────────────────────────────────────────── */
+@media print {
+  /* Force backgrounds and colors to print */
+  *,
+  *::before,
+  *::after {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Page setup — portrait, sensible margins */
+  @page {
+    size: A4 portrait;
+    margin: 16mm 12mm;
+  }
+
+  html, body {
+    width: 100%;
+    height: auto;
+    overflow: visible;
+    background: white !important;
+  }
+
+  /* Remove all transforms / shadows that break layout */
+  * {
+    box-shadow: none !important;
+    text-shadow: none !important;
+  }
+
+  /* Full-width layout — no sidebar gap */
+  #root {
+    display: block;
+    min-height: unset;
+  }
+
+  /* Prevent orphaned rows inside cards */
+  table { border-collapse: collapse; width: 100%; }
+  tr    { break-inside: avoid; }
+  thead { display: table-header-group; }
+
+  /* No links underlined */
+  a { text-decoration: none !important; }
+
+  /* Prevent blank pages from overflow */
+  img { max-width: 100% !important; }
+}

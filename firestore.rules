@@ -1,0 +1,112 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── helpers ────────────────────────────────────────────────────────────
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function userRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function isAdmin() {
+      return isAuth() && userRole() == 'admin';
+    }
+
+    // ── public intake (Apply form) ─────────────────────────────────────────
+    // Unauthenticated parents can submit an application; they write to
+    // clients / students / bookings directly. Reads and mutations require auth.
+
+    match /clients/{id} {
+      allow create: if true;                     // public Apply form
+      allow read, update, delete: if isAuth();
+    }
+
+    match /students/{id} {
+      allow create: if true;                     // public Apply form
+      allow read, update, delete: if isAuth();
+    }
+
+    match /bookings/{id} {
+      allow create: if true;                     // public Apply form
+      allow read, update, delete: if isAuth();
+    }
+
+    // ── driver / route data ─────────────────────────────────────────────────
+    // Admins manage drivers and route assignments.
+    // Drivers can read their own assignments and write route logs.
+
+    match /drivers/{id} {
+      allow read, write: if isAdmin();
+    }
+
+    match /routeAssignments/{id} {
+      allow read:  if isAuth();
+      allow write: if isAdmin();
+    }
+
+    match /routeLogs/{id} {
+      allow read:  if isAuth();
+      allow write: if isAuth();                  // drivers + admins both log runs
+    }
+
+    // ── admin-only collections ──────────────────────────────────────────────
+
+    match /contracts/{id} {
+      allow read, write: if isAdmin();
+    }
+
+    match /emailQueue/{id} {
+      allow read, write: if isAdmin();
+    }
+
+    // ── audit log ────────────────────────────────────────────────────────────
+    // Written exclusively by Cloud Functions (server-side) via the Admin SDK,
+    // which bypasses Security Rules entirely — no client write needed.
+    // Admins can read for investigation; no client writes allowed.
+
+    match /auditLog/{id} {
+      allow read:  if isAdmin();
+      allow write: if false;   // Admin SDK only
+    }
+
+    // ── user profiles ────────────────────────────────────────────────────────
+    // Users can read their own profile (to get role/linkedId).
+    // Admins can read and write all user docs.
+
+    match /users/{userId} {
+      allow read:   if isAuth() && (request.auth.uid == userId || isAdmin());
+      allow create: if isAuth();
+      allow update: if isAdmin() || request.auth.uid == userId;
+      allow delete: if isAdmin();
+    }
+
+    // ── driver live location ─────────────────────────────────────────────────
+    // Drivers write their own location doc (doc id = their driverId / linkedId).
+    // All authenticated users (parents, admins) can read for live tracking.
+
+    match /driverLocations/{driverId} {
+      allow read:  if isAuth();
+      allow write: if isAuth();   // driver writes their own; Admin SDK can also write
+    }
+
+    // ── SMS queue ─────────────────────────────────────────────────────────────
+    // Drivers and the system create queue items; processing is server-side.
+    // Admins can read for monitoring; no one updates directly (functions do).
+
+    match /smsQueue/{id} {
+      allow create: if isAuth();
+      allow read:   if isAdmin();
+      allow update, delete: if false;   // Cloud Functions only (Admin SDK)
+    }
+
+    // ── invoices ──────────────────────────────────────────────────────────────
+
+    match /invoices/{id} {
+      allow read, write: if isAdmin();
+    }
+
+  }
+}
