@@ -1,6 +1,6 @@
-﻿import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
+﻿import React, { useEffect, useState, useMemo, useRef } from 'react';
 import {
-  doc, getDoc, collection, query, where, onSnapshot, setDoc, serverTimestamp, addDoc, updateDoc,
+  doc, getDoc, collection, query, where, onSnapshot, setDoc, deleteDoc, serverTimestamp, addDoc, updateDoc,
 } from 'firebase/firestore';
 import { db } from '../../services/firebase';
 import { useAuth } from '../../context/AuthContext';
@@ -27,42 +27,100 @@ function fmtPhone(phone: string): string {
 }
 
 // ── GPS hook ──────────────────────────────────────────────────────────────────
+// Resilient GPS: auto-retries on signal loss, heartbeat watchdog every 20s,
+// screen wake lock to prevent sleep, restarts when app returns to foreground.
 
 function useDriverGPS(driverId: string | null) {
   const [gpsEnabled, setGpsEnabled] = useState(false);
   const [gpsError, setGpsError]     = useState<string | null>(null);
-  const watchRef = useRef<number | null>(null);
+  const watchRef     = useRef<number | null>(null);
+  const retryRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastUpdateRef = useRef<number>(0);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const wakeLockRef  = useRef<any>(null);
+  const restartRef   = useRef<() => void>(() => {});
 
-  const startTracking = useCallback(() => {
+  useEffect(() => {
     if (!driverId) return;
     if (!navigator.geolocation) { setGpsError('GPS not supported on this device'); return; }
-    watchRef.current = navigator.geolocation.watchPosition(
-      pos => {
-        setGpsEnabled(true);
-        setGpsError(null);
-        setDoc(doc(db, 'driverLocations', driverId), {
-          driverId,
-          lat: pos.coords.latitude,
-          lng: pos.coords.longitude,
-          heading: pos.coords.heading ?? null,
-          speed: pos.coords.speed != null ? pos.coords.speed * 3.6 : null,
-          updatedAt: serverTimestamp(),
-        }, { merge: true }).catch(() => {});
-      },
-      err => {
-        setGpsEnabled(false);
-        setGpsError(err.code === 1 ? 'Location access denied' : 'GPS unavailable');
-      },
-      { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 },
-    );
+
+    const id = driverId;
+
+    function startWatch() {
+      // Clear any existing watch + pending retry before starting fresh
+      if (watchRef.current != null) { navigator.geolocation.clearWatch(watchRef.current); watchRef.current = null; }
+      if (retryRef.current) { clearTimeout(retryRef.current); retryRef.current = null; }
+
+      lastUpdateRef.current = Date.now(); // baseline so heartbeat doesn't fire immediately
+
+      watchRef.current = navigator.geolocation.watchPosition(
+        pos => {
+          setGpsEnabled(true);
+          setGpsError(null);
+          lastUpdateRef.current = Date.now();
+          setDoc(doc(db, 'driverLocations', id), {
+            driverId: id,
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+            heading: pos.coords.heading ?? null,
+            speed: pos.coords.speed != null ? pos.coords.speed * 3.6 : null,
+            updatedAt: serverTimestamp(),
+          }, { merge: true }).catch(() => {});
+        },
+        err => {
+          setGpsEnabled(false);
+          if (err.code === 1) {
+            // Permission denied — user must act, can't auto-recover
+            setGpsError('Location access denied — tap Allow to share location');
+          } else {
+            // Timeout or unavailable — auto-retry in 5s
+            setGpsError('GPS signal weak — retrying in 5s…');
+            if (watchRef.current != null) { navigator.geolocation.clearWatch(watchRef.current); watchRef.current = null; }
+            retryRef.current = setTimeout(startWatch, 5000);
+          }
+        },
+        { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 },
+      );
+    }
+
+    restartRef.current = startWatch;
+    startWatch();
+
+    // Wake lock — keeps screen on while driver is active so GPS isn't throttled
+    const requestWakeLock = async () => {
+      if ('wakeLock' in navigator) {
+        try { wakeLockRef.current = await (navigator as any).wakeLock.request('screen'); } catch {}
+      }
+    };
+    requestWakeLock();
+
+    // Heartbeat: if no GPS update in 40s, restart the watch
+    heartbeatRef.current = setInterval(() => {
+      if (Date.now() - lastUpdateRef.current > 40_000) {
+        setGpsError('GPS signal lost — reconnecting…');
+        startWatch();
+      }
+    }, 20_000);
+
+    // Restart when driver switches back to this tab/app after backgrounding
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        restartRef.current();
+        requestWakeLock();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+      if (watchRef.current != null) { navigator.geolocation.clearWatch(watchRef.current); watchRef.current = null; }
+      if (retryRef.current) { clearTimeout(retryRef.current); retryRef.current = null; }
+      if (heartbeatRef.current) { clearInterval(heartbeatRef.current); heartbeatRef.current = null; }
+      if (wakeLockRef.current) { wakeLockRef.current.release().catch(() => {}); wakeLockRef.current = null; }
+      document.removeEventListener('visibilitychange', onVisible);
+      setGpsEnabled(false);
+    };
   }, [driverId]);
-
-  const stopTracking = useCallback(() => {
-    if (watchRef.current != null) { navigator.geolocation.clearWatch(watchRef.current); watchRef.current = null; }
-    setGpsEnabled(false);
-  }, []);
-
-  useEffect(() => { if (driverId) startTracking(); return stopTracking; }, [driverId, startTracking, stopTracking]);
 
   return { gpsEnabled, gpsError };
 }
@@ -157,6 +215,29 @@ const DriverDashboard: React.FC = () => {
     todayLogs.forEach(l => { map[l.bookingId] = l; });
     return map;
   }, [todayLogs]);
+
+  // True when every route today is either missed or all non-absent students dropped off
+  const allDoneToday = useMemo(() => {
+    if (todayAssignments.length === 0) return false;
+    return todayAssignments.every(a => {
+      const log = todayLogMap[a.bookingId];
+      if (log?.ran === false) return true; // missed = done
+      const booking = bookings[a.bookingId];
+      if (!booking) return false;
+      const sids = booking.studentIds ?? [];
+      if (sids.length === 0) return log?.ran === true;
+      const evts = (log?.studentEvents ?? {}) as Record<string, { status: string }>;
+      const absent  = sids.filter(sid => evts[sid]?.status === 'absent').length;
+      const dropped = sids.filter(sid => evts[sid]?.status === 'dropped_off').length;
+      return dropped >= (sids.length - absent);
+    });
+  }, [todayAssignments, bookings, todayLogMap]);
+
+  // Remove GPS location from Firestore once all routes are done — stops showing on Dispatch map
+  useEffect(() => {
+    if (!linkedId || !allDoneToday || todayAssignments.length === 0) return;
+    deleteDoc(doc(db, 'driverLocations', linkedId)).catch(() => {});
+  }, [allDoneToday, linkedId, todayAssignments.length]);
 
   // ── actions ───────────────────────────────────────────────────────────────
 
