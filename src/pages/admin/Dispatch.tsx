@@ -465,10 +465,6 @@ const Dispatch: React.FC = () => {
     ? driverLocationsList.filter(d => d.driverId === selectedRoute.driverId)
     : driverLocationsList;
 
-  const clients = Object.fromEntries(
-    todayRoutes.map(r => r.client ? [r.booking.clientId, r.client] : [])
-  );
-
   if (loading) {
     return (
       <div className="p-8 space-y-4">

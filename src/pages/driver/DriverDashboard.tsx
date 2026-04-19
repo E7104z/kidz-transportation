@@ -352,7 +352,7 @@ const DriverDashboard: React.FC = () => {
       deleteDoc(doc(db, 'driverLocations', linkedId)).catch(() => {});
     }
     setGpsActive(v => !v);
-    toast(prev => gpsActive ? 'GPS stopped — location hidden from dispatch' : 'GPS started — sharing location', { icon: gpsActive ? '📍' : '🛰️' });
+    toast(gpsActive ? 'GPS stopped — location hidden from dispatch' : 'GPS started — sharing location', { icon: gpsActive ? '📍' : '🛰️' });
   };
 
   const handleLogout = async () => { await signOut(); navigate('/login', { replace: true }); };
