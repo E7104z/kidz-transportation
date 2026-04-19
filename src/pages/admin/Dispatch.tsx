@@ -455,7 +455,8 @@ const Dispatch: React.FC = () => {
       const millis = (loc.updatedAt as any)?.toMillis?.() ?? 0;
       return Date.now() - millis < STALE_MS;
     }),
-    [driverLocations],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [driverLocations, tick],
   );
 
   const selectedRoute = todayRoutes.find(r => r.booking.id === selectedRouteId) ?? null;

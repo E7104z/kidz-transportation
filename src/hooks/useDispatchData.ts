@@ -154,29 +154,15 @@ export function useDispatchData(): DispatchData {
 
   // ── Driver locations ────────────────────────────────────────────────────
   useEffect(() => {
-    const driverIds = Object.keys(drivers);
-    if (driverIds.length === 0) return;
-    const unsubs = driverIds.map(dId =>
-      onSnapshot(
-        doc(db, 'driverLocations', dId),
-        (snap) => {
-          if (!snap.exists()) {
-            setDriverLocations(prev => {
-              const next = { ...prev };
-              delete next[dId];
-              return next;
-            });
-            return;
-          }
-          setDriverLocations(prev => ({
-            ...prev,
-            [dId]: { ...(snap.data() as DriverLocation), driverId: dId },
-          }));
-        },
-      )
-    );
-    return () => unsubs.forEach(u => u());
-  }, [drivers]);
+    const unsub = onSnapshot(collection(db, 'driverLocations'), snap => {
+      const locs: Record<string, DriverLocation> = {};
+      snap.docs.forEach(d => {
+        locs[d.id] = { ...(d.data() as DriverLocation), driverId: d.id };
+      });
+      setDriverLocations(locs);
+    });
+    return unsub;
+  }, []);
 
   // ── Build dispatche routes ──────────────────────────────────────────────
   const todayRoutes = useMemo<DispatchRoute[]>(() => {
