@@ -160,7 +160,14 @@ export function useDispatchData(): DispatchData {
       onSnapshot(
         doc(db, 'driverLocations', dId),
         (snap) => {
-          if (!snap.exists()) return;
+          if (!snap.exists()) {
+            setDriverLocations(prev => {
+              const next = { ...prev };
+              delete next[dId];
+              return next;
+            });
+            return;
+          }
           setDriverLocations(prev => ({
             ...prev,
             [dId]: { ...(snap.data() as DriverLocation), driverId: dId },

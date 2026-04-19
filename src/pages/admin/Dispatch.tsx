@@ -448,7 +448,15 @@ const Dispatch: React.FC = () => {
   const criticalCount = alerts.filter(a => a.isToday && a.severity === 'critical').length;
   const warningCount  = alerts.filter(a => a.isToday && a.severity === 'warning').length;
 
-  const driverLocationsList = Object.values(driverLocations) as DriverLocation[];
+  // Only show GPS pings updated in the last 15 minutes — filters out stale/abandoned sessions
+  const STALE_MS = 15 * 60 * 1000;
+  const driverLocationsList = useMemo(
+    () => (Object.values(driverLocations) as DriverLocation[]).filter(loc => {
+      const millis = (loc.updatedAt as any)?.toMillis?.() ?? 0;
+      return Date.now() - millis < STALE_MS;
+    }),
+    [driverLocations],
+  );
 
   const selectedRoute = todayRoutes.find(r => r.booking.id === selectedRouteId) ?? null;
 
