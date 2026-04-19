@@ -48,6 +48,8 @@ function useDriverGPS(driverId: string | null, active: boolean) {
       if (retryRef.current) { clearTimeout(retryRef.current); retryRef.current = null; }
       if (heartbeatRef.current) { clearInterval(heartbeatRef.current); heartbeatRef.current = null; }
       if (wakeLockRef.current) { wakeLockRef.current.release().catch(() => {}); wakeLockRef.current = null; }
+      // Remove Firestore doc so admin/parent maps update immediately
+      if (driverId) { deleteDoc(doc(db, 'driverLocations', driverId)).catch(() => {}); }
       setGpsEnabled(false);
       setGpsError(null);
       return;
@@ -348,15 +350,14 @@ const DriverDashboard: React.FC = () => {
   };
 
   const toggleGps = () => {
-    if (gpsActive && linkedId) {
-      deleteDoc(doc(db, 'driverLocations', linkedId)).catch(() => {});
-    }
     setGpsActive(v => !v);
     toast(gpsActive ? 'GPS stopped — location hidden from dispatch' : 'GPS started — sharing location', { icon: gpsActive ? '📍' : '🛰️' });
   };
 
   const handleLogout = async () => {
-    if (linkedId) deleteDoc(doc(db, 'driverLocations', linkedId)).catch(() => {});
+    if (linkedId) {
+      try { await deleteDoc(doc(db, 'driverLocations', linkedId)); } catch {}
+    }
     await signOut();
     navigate('/login', { replace: true });
   };
