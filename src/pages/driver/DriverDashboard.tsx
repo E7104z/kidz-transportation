@@ -30,7 +30,7 @@ function fmtPhone(phone: string): string {
 // Resilient GPS: auto-retries on signal loss, heartbeat watchdog every 20s,
 // screen wake lock to prevent sleep, restarts when app returns to foreground.
 
-function useDriverGPS(driverId: string | null) {
+function useDriverGPS(driverId: string | null, active: boolean) {
   const [gpsEnabled, setGpsEnabled] = useState(false);
   const [gpsError, setGpsError]     = useState<string | null>(null);
   const watchRef     = useRef<number | null>(null);
@@ -42,7 +42,16 @@ function useDriverGPS(driverId: string | null) {
   const restartRef   = useRef<() => void>(() => {});
 
   useEffect(() => {
-    if (!driverId) return;
+    if (!driverId || !active) {
+      // Tear down everything when manually disabled
+      if (watchRef.current != null) { navigator.geolocation.clearWatch(watchRef.current); watchRef.current = null; }
+      if (retryRef.current) { clearTimeout(retryRef.current); retryRef.current = null; }
+      if (heartbeatRef.current) { clearInterval(heartbeatRef.current); heartbeatRef.current = null; }
+      if (wakeLockRef.current) { wakeLockRef.current.release().catch(() => {}); wakeLockRef.current = null; }
+      setGpsEnabled(false);
+      setGpsError(null);
+      return;
+    }
     if (!navigator.geolocation) { setGpsError('GPS not supported on this device'); return; }
 
     const id = driverId;
@@ -120,7 +129,7 @@ function useDriverGPS(driverId: string | null) {
       document.removeEventListener('visibilitychange', onVisible);
       setGpsEnabled(false);
     };
-  }, [driverId]);
+  }, [driverId, active]);
 
   return { gpsEnabled, gpsError };
 }
@@ -148,11 +157,12 @@ const DriverDashboard: React.FC = () => {
   const [linkedId,    setLinkedId]    = useState('');
   const [expandedRoute,   setExpandedRoute]   = useState<string | null>(null);
   const [savingEvent,     setSavingEvent]     = useState<string | null>(null);
+  const [gpsActive,       setGpsActive]       = useState(true);
 
   const todayStr     = useMemo(() => format(new Date(), 'yyyy-MM-dd'), []);
   const todayDayName = useMemo(() => format(new Date(), 'EEEE'), []);
 
-  const { gpsEnabled, gpsError } = useDriverGPS(linkedId || null);
+  const { gpsEnabled, gpsError } = useDriverGPS(linkedId || null, gpsActive);
 
   // ── subscriptions ─────────────────────────────────────────────────────────
 
@@ -337,6 +347,14 @@ const DriverDashboard: React.FC = () => {
     toast.success('Parent notified \u2014 driver nearby');
   };
 
+  const toggleGps = () => {
+    if (gpsActive && linkedId) {
+      deleteDoc(doc(db, 'driverLocations', linkedId)).catch(() => {});
+    }
+    setGpsActive(v => !v);
+    toast(prev => gpsActive ? 'GPS stopped — location hidden from dispatch' : 'GPS started — sharing location', { icon: gpsActive ? '📍' : '🛰️' });
+  };
+
   const handleLogout = async () => { await signOut(); navigate('/login', { replace: true }); };
 
   // ── render ────────────────────────────────────────────────────────────────
@@ -355,11 +373,20 @@ const DriverDashboard: React.FC = () => {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <div title={gpsError ?? (gpsEnabled ? 'Location sharing on' : 'Location off')}
-            className={`flex items-center gap-1 text-xs px-2 py-1 rounded-full ${gpsEnabled ? 'bg-white/20 text-white' : 'bg-white/10 text-white/50'}`}>
-            {gpsEnabled ? <Wifi size={12} /> : <WifiOff size={12} />}
-            <span className="hidden sm:inline">{gpsEnabled ? 'GPS' : 'No GPS'}</span>
-          </div>
+          <button
+            onClick={toggleGps}
+            title={gpsActive ? (gpsEnabled ? 'GPS active — tap to stop' : 'Acquiring GPS…') : 'GPS stopped — tap to start'}
+            className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-full font-medium border transition-colors ${
+              gpsActive && gpsEnabled
+                ? 'bg-emerald-400/25 text-white border-emerald-300/40 hover:bg-emerald-400/40'
+                : gpsActive
+                ? 'bg-amber-400/25 text-white border-amber-300/40 hover:bg-amber-400/40'
+                : 'bg-white/10 text-white/50 border-white/10 hover:bg-white/20 hover:text-white'
+            }`}
+          >
+            {gpsActive ? <Wifi size={13} /> : <WifiOff size={13} />}
+            <span>{gpsActive ? (gpsEnabled ? 'GPS On' : 'GPS…') : 'GPS Off'}</span>
+          </button>
           <button onClick={handleLogout}
             className="flex items-center gap-1.5 bg-white/20 hover:bg-white/30 text-white text-xs font-medium px-3 py-1.5 rounded-lg transition-colors">
             <LogOut size={13} /> Logout
@@ -367,7 +394,7 @@ const DriverDashboard: React.FC = () => {
         </div>
       </div>
 
-      {gpsError && (
+      {gpsActive && gpsError && (
         <div className="mx-5 mt-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 flex items-center gap-2 text-xs text-amber-800">
           <AlertCircle size={14} className="flex-shrink-0" />
           {gpsError} — tap Allow Location if prompted
