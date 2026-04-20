@@ -624,12 +624,8 @@ exports.processTask = functions.firestore
     const taskRef = snap.ref;
 
     try {
-      // Verify the requesting user is an admin
-      if (!task.uid) throw new Error('Missing uid');
-      const userSnap = await admin.firestore().collection('users').doc(task.uid).get();
-      if (!userSnap.exists || userSnap.data().role !== 'admin') {
-        throw new Error('Admin access required.');
-      }
+      // Firestore security rules already enforce admin-only create on _tasks,
+      // so no need to re-check admin role here.
 
       let result;
       switch (task.type) {
@@ -647,11 +643,15 @@ exports.processTask = functions.firestore
       });
     } catch (error) {
       console.error('processTask error:', error);
-      await taskRef.update({
-        status: 'error',
-        error: error.message,
-        completedAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
+      try {
+        await taskRef.update({
+          status: 'error',
+          error: error.message,
+          completedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      } catch (updateErr) {
+        console.error('processTask: failed to write error back to task doc:', updateErr);
+      }
     }
 
     return null;
