@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from 'react';
 import {
-  collection, onSnapshot, query, where, getDocs, doc,
+  collection, onSnapshot, query, where, getDocs,
 } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import { format, subDays, differenceInMinutes } from 'date-fns';

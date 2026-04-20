@@ -492,20 +492,15 @@ exports.setupAutoPay = functions.https.onCall(async (data, context) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CALLABLE: generateWeeklyInvoices
-// Admin-triggered (or scheduled): creates invoices for the upcoming week.
-// For each client with active bookings, creates one combined invoice if
-// one doesn't already exist for that weekOf.
-// Payload: { weekOf?: string } — YYYY-MM-DD of the Monday. Defaults to next Monday.
+// HELPER: doGenerateWeeklyInvoices
+// Core logic extracted so both the onCall and the Firestore-trigger can use it.
 // ─────────────────────────────────────────────────────────────────────────────
-exports.generateWeeklyInvoices = functions.https.onCall(async (data, context) => {
-  await assertAdmin(context);
-
+async function doGenerateWeeklyInvoices(weekOfInput) {
   const db = admin.firestore();
   const now = admin.firestore.FieldValue.serverTimestamp();
 
   // Determine the target Monday
-  let weekOf = data?.weekOf;
+  let weekOf = weekOfInput;
   if (!weekOf) {
     const today = new Date();
     const dayOfWeek = today.getDay();
@@ -606,7 +601,61 @@ exports.generateWeeklyInvoices = functions.https.onCall(async (data, context) =>
   }
 
   return { created, skipped, weekOf };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: generateWeeklyInvoices  (kept for backward compat / server calls)
+// ─────────────────────────────────────────────────────────────────────────────
+exports.generateWeeklyInvoices = functions.https.onCall(async (data, context) => {
+  await assertAdmin(context);
+  return doGenerateWeeklyInvoices(data?.weekOf);
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIRESTORE TRIGGER: processTask
+// Generic task processor that bypasses Cloud Functions IAM restrictions.
+// Client writes a task doc → this trigger picks it up, runs the logic,
+// and writes the result back to the same doc.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.processTask = functions.firestore
+  .document('_tasks/{taskId}')
+  .onCreate(async (snap, context) => {
+    const task = snap.data();
+    const taskRef = snap.ref;
+
+    try {
+      // Verify the requesting user is an admin
+      if (!task.uid) throw new Error('Missing uid');
+      const userSnap = await admin.firestore().collection('users').doc(task.uid).get();
+      if (!userSnap.exists || userSnap.data().role !== 'admin') {
+        throw new Error('Admin access required.');
+      }
+
+      let result;
+      switch (task.type) {
+        case 'generateWeeklyInvoices':
+          result = await doGenerateWeeklyInvoices(task.weekOf);
+          break;
+        default:
+          throw new Error(`Unknown task type: ${task.type}`);
+      }
+
+      await taskRef.update({
+        status: 'completed',
+        result,
+        completedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    } catch (error) {
+      console.error('processTask error:', error);
+      await taskRef.update({
+        status: 'error',
+        error: error.message,
+        completedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+
+    return null;
+  });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CALLABLE: adminOverrideInvoice

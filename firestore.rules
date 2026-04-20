@@ -123,5 +123,15 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
+    // ── background tasks (admin → Cloud Function via Firestore trigger) ──────
+    // Admins create task docs; Cloud Functions (Admin SDK) update them with
+    // results.  Clients can read to poll for completion.
+
+    match /_tasks/{id} {
+      allow create: if isAdmin();
+      allow read:   if isAdmin();
+      allow update, delete: if false;   // Cloud Functions only (Admin SDK)
+    }
+
   }
 }

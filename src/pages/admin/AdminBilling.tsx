@@ -1,22 +1,19 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import {
   collection, getDocs, query, orderBy, doc, onSnapshot,
+  addDoc, serverTimestamp,
 } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
-import { db, functions } from '../../services/firebase';
+import { db, functions, auth } from '../../services/firebase';
 import type { Invoice, Client, Booking } from '../../types';
 import { format, startOfWeek, addDays } from 'date-fns';
 import toast from 'react-hot-toast';
 import {
   DollarSign, CheckCircle, AlertCircle, Clock, FileText,
   Receipt, RefreshCw, Loader2, Shield, ChevronDown, ChevronUp,
-  Calendar, Users, Zap, CreditCard, Plus, Search, Filter,
-  Ban, ArrowUpRight,
+  Calendar, Zap, Plus, Search,
+  Ban,
 } from 'lucide-react';
-
-// ── helpers ─────────────────────────────────────────────────────────────────
-
-import { toDate } from '../../utils/dates';
 
 const STATUS_STYLES: Record<string, { label: string; color: string; bg: string; icon: React.ElementType }> = {
   draft:   { label: 'Draft',   color: 'text-slate-600',   bg: 'bg-slate-100',   icon: FileText },
@@ -34,7 +31,7 @@ const AdminBilling: React.FC = () => {
   const [tab, setTab] = useState<Tab>('overview');
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
-  const [bookings, setBookings] = useState<Booking[]>([]);
+  const [, setBookings] = useState<Booking[]>([]);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [processingAutoPay, setProcessingAutoPay] = useState(false);
@@ -115,15 +112,31 @@ const AdminBilling: React.FC = () => {
   const handleGenerate = async () => {
     setGenerating(true);
     try {
-      const fn = httpsCallable(functions, 'generateWeeklyInvoices');
       const monday = format(startOfWeek(addDays(new Date(), 7), { weekStartsOn: 1 }), 'yyyy-MM-dd');
-      const result = await fn({ weekOf: monday });
-      const { created, skipped } = result.data as { created: number; skipped: number };
-      toast.success(`Generated ${created} invoice(s)${skipped ? `, ${skipped} already existed` : ''}`);
-      loadData();
+      // Write a task document — the processTask Cloud Function trigger picks it up
+      const taskRef = await addDoc(collection(db, '_tasks'), {
+        type: 'generateWeeklyInvoices',
+        weekOf: monday,
+        uid: auth.currentUser!.uid,
+        status: 'pending',
+        createdAt: serverTimestamp(),
+      });
+      // Listen for the function to update this doc with the result
+      const unsub = onSnapshot(doc(db, '_tasks', taskRef.id), (snap) => {
+        const data = snap.data();
+        if (!data || data.status === 'pending') return;
+        unsub();
+        if (data.status === 'completed') {
+          const { created, skipped } = data.result as { created: number; skipped: number };
+          toast.success(`Generated ${created} invoice(s)${skipped ? `, ${skipped} already existed` : ''}`);
+          loadData();
+        } else {
+          toast.error(data.error || 'Failed to generate invoices');
+        }
+        setGenerating(false);
+      });
     } catch (err: any) {
       toast.error(err?.message || 'Failed to generate invoices');
-    } finally {
       setGenerating(false);
     }
   };
