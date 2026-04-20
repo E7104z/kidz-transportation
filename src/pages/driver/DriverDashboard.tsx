@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useState, useMemo, useRef } from 'react';
+﻿import React, { useEffect, useState, useMemo, useRef, useCallback } from 'react';
 import {
   doc, getDoc, collection, query, where, onSnapshot, setDoc, deleteDoc, serverTimestamp, addDoc, updateDoc,
 } from 'firebase/firestore';
@@ -160,9 +160,22 @@ const DriverDashboard: React.FC = () => {
   const [expandedRoute,   setExpandedRoute]   = useState<string | null>(null);
   const [savingEvent,     setSavingEvent]     = useState<string | null>(null);
   const [gpsActive,       setGpsActive]       = useState(true);
+  const [isOnline,         setIsOnline]         = useState(navigator.onLine);
 
   const todayStr     = useMemo(() => format(new Date(), 'yyyy-MM-dd'), []);
   const todayDayName = useMemo(() => format(new Date(), 'EEEE'), []);
+
+  // ── online/offline status ─────────────────────────────────────────────────
+  useEffect(() => {
+    const goOnline  = () => setIsOnline(true);
+    const goOffline = () => setIsOnline(false);
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
+    return () => {
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
+    };
+  }, []);
 
   const { gpsEnabled, gpsError } = useDriverGPS(linkedId || null, gpsActive);
 
@@ -388,6 +401,11 @@ const DriverDashboard: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-slate-100 pb-10">
+      {!isOnline && (
+        <div className="bg-amber-500 text-white text-xs font-semibold text-center py-2 px-4">
+          You are offline — actions will sync when connection is restored
+        </div>
+      )}
       {/* Header */}
       <div className="bg-gradient-to-r from-teal-600 to-emerald-600 px-5 py-4 flex items-center justify-between sticky top-0 z-10 shadow-md">
         <div className="flex items-center gap-3">
