@@ -36,6 +36,13 @@ jobs:
           VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
           VITE_GOOGLE_MAPS_API_KEY: ${{ secrets.VITE_GOOGLE_MAPS_API_KEY }}
 
+      - name: Verify build has Firebase config
+        run: |
+          if ! grep -q "kidz-transportation" dist/assets/*.js; then
+            echo "ERROR: Build is missing Firebase config. Set VITE_* GitHub secrets."
+            exit 1
+          fi
+
       - name: Deploy to Firebase
         run: npx firebase deploy --only hosting,firestore:rules,functions --token "$FIREBASE_TOKEN" --non-interactive
         env:
