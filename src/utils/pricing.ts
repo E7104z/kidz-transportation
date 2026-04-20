@@ -5,7 +5,7 @@ const SURCHARGE_PER_MILE_9_12 = 3.0;
 const RATE_13_PLUS = 2.25;
 const ADDON_ONEWAY = 10.0;
 const ADDON_ROUNDTRIP = 20.0;
-const DRIVER_SPLIT = 0.75;
+const DRIVER_SPLIT = 0.70;
 
 export function computeWeeklyCharge(
   mileage: number,

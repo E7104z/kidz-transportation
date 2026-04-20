@@ -102,7 +102,7 @@ exports.recalcPayout = functions.firestore
     if (!bookingSnap.exists) return;
 
     const weeklyRate   = bookingSnap.data().weeklyRate || 0;
-    const weeklyPayout = Math.round(weeklyRate * 0.75 * 100) / 100; // cents-accurate
+    const weeklyPayout = Math.round(weeklyRate * 0.70 * 100) / 100; // 70/30 split
 
     await snap.ref.update({ weeklyPayout });
 
@@ -115,6 +115,46 @@ exports.recalcPayout = functions.firestore
       weeklyPayout,
       timestamp:   admin.firestore.FieldValue.serverTimestamp(),
     });
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRIGGER: autoCompleteRoute
+// Fires when a routeLog document is written (create or update).
+// If every student in the booking is either dropped_off or absent, the
+// route is automatically marked ran=true so drivers don't need to do it
+// manually and payout calculates correctly.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.autoCompleteRoute = functions.firestore
+  .document('routeLogs/{logId}')
+  .onWrite(async (change, context) => {
+    const after = change.after.exists ? change.after.data() : null;
+    if (!after) return; // deleted — nothing to do
+
+    // If already explicitly marked ran=false (driver said missed), don't override
+    if (after.ran === false) return;
+    // If already ran=true with no student events, skip (manual complete)
+    if (after.ran === true && !after.studentEvents) return;
+
+    const bookingId = after.bookingId;
+    if (!bookingId) return;
+
+    const db = admin.firestore();
+    const bookingSnap = await db.collection('bookings').doc(bookingId).get();
+    if (!bookingSnap.exists) return;
+
+    const studentIds = bookingSnap.data().studentIds || [];
+    if (studentIds.length === 0) return; // no students to check
+
+    const events = after.studentEvents || {};
+    const allAccountedFor = studentIds.every(sid => {
+      const status = events[sid]?.status;
+      return status === 'dropped_off' || status === 'absent' || status === 'no_show';
+    });
+
+    // Auto-set ran=true when all students are accounted for
+    if (allAccountedFor && after.ran !== true) {
+      await change.after.ref.update({ ran: true, autoCompleted: true });
+    }
   });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -811,4 +851,179 @@ exports.processEmailQueue = functions.firestore
       });
       console.error('processEmailQueue error:', err);
     }
+  });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCHEDULED AUTOMATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCHEDULED: rollForwardAssignments
+// Runs every Monday at 6:00 AM UTC (1:00 AM Central).
+// For each active booking that has a routeAssignment for the previous week,
+// automatically creates a new assignment for the current week, preserving
+// the same driverId and daysWorked. Skips if an assignment already exists
+// for this week. The recalcPayout trigger fires on each new doc to calculate
+// the server-side payout.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.rollForwardAssignments = functions.pubsub
+  .schedule('every monday 06:00')
+  .timeZone('America/Chicago')
+  .onRun(async () => {
+    const db  = admin.firestore();
+    const now = admin.firestore.FieldValue.serverTimestamp();
+
+    // This Monday at midnight
+    const today = new Date();
+    const day   = today.getDay();
+    const diff  = today.getDate() - day + (day === 0 ? -6 : 1);
+    const thisMonday = new Date(today);
+    thisMonday.setDate(diff);
+    thisMonday.setHours(0, 0, 0, 0);
+
+    // Last Monday
+    const lastMonday = new Date(thisMonday);
+    lastMonday.setDate(thisMonday.getDate() - 7);
+
+    // Get all active bookings
+    const activeBookings = await db.collection('bookings')
+      .where('status', '==', 'active')
+      .get();
+
+    const activeBookingIds = new Set(activeBookings.docs.map(d => d.id));
+
+    // Get last week's assignments
+    const lastWeekAssignments = await db.collection('routeAssignments')
+      .where('weekStart', '>=', lastMonday)
+      .where('weekStart', '<', thisMonday)
+      .get();
+
+    // Get this week's existing assignments to avoid duplicates
+    const nextMonday = new Date(thisMonday);
+    nextMonday.setDate(thisMonday.getDate() + 7);
+    const thisWeekAssignments = await db.collection('routeAssignments')
+      .where('weekStart', '>=', thisMonday)
+      .where('weekStart', '<', nextMonday)
+      .get();
+
+    const existingThisWeek = new Set(
+      thisWeekAssignments.docs.map(d => `${d.data().driverId}_${d.data().bookingId}`)
+    );
+
+    let created = 0;
+    let skipped = 0;
+
+    for (const doc of lastWeekAssignments.docs) {
+      const prev = doc.data();
+
+      // Only roll forward if the booking is still active
+      if (!activeBookingIds.has(prev.bookingId)) { skipped++; continue; }
+
+      // Skip if already assigned this week
+      const key = `${prev.driverId}_${prev.bookingId}`;
+      if (existingThisWeek.has(key)) { skipped++; continue; }
+
+      await db.collection('routeAssignments').add({
+        driverId:     prev.driverId,
+        bookingId:    prev.bookingId,
+        weekStart:    thisMonday,
+        daysWorked:   prev.daysWorked || [],
+        weeklyPayout: 0, // recalcPayout trigger will overwrite with server-calculated value
+        status:       'pending',
+        paidDate:     null,
+        autoGenerated: true,
+        createdAt:    now,
+      });
+
+      created++;
+    }
+
+    console.log(`rollForwardAssignments: created=${created}, skipped=${skipped}`);
+    return null;
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCHEDULED: createMissedRouteLogs
+// Runs every day at 11:00 PM Central (05:00 UTC next day).
+// For each active booking scheduled today that has no routeLog, creates a
+// log with ran=false so missed routes have an audit trail and $0 payout.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.createMissedRouteLogs = functions.pubsub
+  .schedule('every day 23:00')
+  .timeZone('America/Chicago')
+  .onRun(async () => {
+    const db  = admin.firestore();
+    const now = admin.firestore.FieldValue.serverTimestamp();
+
+    const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const today     = new Date();
+    const todayName = DAY_NAMES[today.getDay()];
+    const todayStr  = today.toISOString().split('T')[0]; // YYYY-MM-DD
+
+    // Skip weekends
+    if (today.getDay() === 0 || today.getDay() === 6) {
+      console.log('createMissedRouteLogs: weekend — skipping');
+      return null;
+    }
+
+    // Get all active bookings scheduled for today
+    const bookingsSnap = await db.collection('bookings')
+      .where('status', '==', 'active')
+      .get();
+
+    const todayBookings = bookingsSnap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .filter(b => (b.daysOfWeek || []).includes(todayName));
+
+    if (todayBookings.length === 0) {
+      console.log('createMissedRouteLogs: no bookings scheduled today');
+      return null;
+    }
+
+    // Find assignments for today to get driverId
+    const thisMonday = new Date(today);
+    const dayOfWeek  = today.getDay();
+    thisMonday.setDate(today.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1));
+    thisMonday.setHours(0, 0, 0, 0);
+    const nextMonday = new Date(thisMonday);
+    nextMonday.setDate(thisMonday.getDate() + 7);
+
+    const assignmentsSnap = await db.collection('routeAssignments')
+      .where('weekStart', '>=', thisMonday)
+      .where('weekStart', '<', nextMonday)
+      .get();
+
+    const assignmentByBooking = {};
+    assignmentsSnap.docs.forEach(d => {
+      const data = d.data();
+      assignmentByBooking[data.bookingId] = data;
+    });
+
+    let created = 0;
+    let skippedExisting = 0;
+
+    for (const booking of todayBookings) {
+      const logId = `${booking.id}_${todayStr}`;
+      const existing = await db.collection('routeLogs').doc(logId).get();
+      if (existing.exists) { skippedExisting++; continue; }
+
+      const assignment = assignmentByBooking[booking.id];
+      const driverId   = assignment?.driverId || '';
+
+      await db.collection('routeLogs').doc(logId).set({
+        bookingId:     booking.id,
+        driverId,
+        date:          todayStr,
+        ran:           false,
+        autoMissed:    true,
+        confirmedBy:   'system',
+        confirmedAt:   now,
+        notes:         'Auto-generated: no driver activity recorded for this route today.',
+      });
+
+      created++;
+    }
+
+    console.log(`createMissedRouteLogs: created=${created}, skippedExisting=${skippedExisting}`);
+    return null;
   });

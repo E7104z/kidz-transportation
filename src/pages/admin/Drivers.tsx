@@ -102,7 +102,7 @@ const Drivers: React.FC = () => {
       bookingId: booking.id,
       weekStart: getWeekStart(),
       daysWorked: booking.daysOfWeek,
-      weeklyPayout: (booking.weeklyRate || 0) * 0.75,
+      weeklyPayout: (booking.weeklyRate || 0) * 0.70,
       status: 'pending',
       paidDate: null,
       createdAt: serverTimestamp(),

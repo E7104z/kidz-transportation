@@ -172,10 +172,37 @@ const Payroll: React.FC = () => {
       .filter(a => a.status === 'pending')
       .map(a => a.id);
     if (!pendingIds.length) return;
-    await markPaymentFn({ assignmentIds: pendingIds });
-    setAssignments(prev =>
-      prev.map(a => pendingIds.includes(a.id) ? { ...a, status: 'paid' } : a)
-    );
+    setMarking('batch');
+    try {
+      await markPaymentFn({ assignmentIds: pendingIds });
+      setAssignments(prev =>
+        prev.map(a => pendingIds.includes(a.id) ? { ...a, status: 'paid' } : a)
+      );
+    } finally {
+      setMarking(null);
+    }
+  };
+
+  const allPendingInPeriod = useMemo(
+    () => periodAssignments.filter(a => a.status === 'pending'),
+    [periodAssignments],
+  );
+
+  const markAllPeriodPaid = async () => {
+    const ids = allPendingInPeriod.map(a => a.id);
+    if (!ids.length) return;
+    setMarking('batch-all');
+    try {
+      // Batch in chunks of 245 (server limit)
+      for (let i = 0; i < ids.length; i += 245) {
+        await markPaymentFn({ assignmentIds: ids.slice(i, i + 245) });
+      }
+      setAssignments(prev =>
+        prev.map(a => ids.includes(a.id) ? { ...a, status: 'paid' } : a)
+      );
+    } finally {
+      setMarking(null);
+    }
   };
 
   // ── revenue calculations ──────────────────────────────────────────────────
@@ -223,9 +250,21 @@ const Payroll: React.FC = () => {
           <p className="text-amber-100 text-sm">Driver pay · business income · period reports</p>
         </div>
         {totalOutstanding > 0 && (
-          <div className="text-right">
-            <div className="text-xs text-amber-100 uppercase tracking-wide">Outstanding</div>
-            <div className="text-2xl font-bold text-white">${totalOutstanding.toFixed(2)}</div>
+          <div className="text-right flex items-center gap-4">
+            <div>
+              <div className="text-xs text-amber-100 uppercase tracking-wide">Outstanding</div>
+              <div className="text-2xl font-bold text-white">${totalOutstanding.toFixed(2)}</div>
+            </div>
+            <button
+              onClick={markAllPeriodPaid}
+              disabled={marking === 'batch-all'}
+              className="flex items-center gap-1.5 bg-white/20 hover:bg-white/30 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors disabled:opacity-60"
+            >
+              {marking === 'batch-all'
+                ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                : <DollarSign size={15} />}
+              Pay All Drivers
+            </button>
           </div>
         )}
       </div>
