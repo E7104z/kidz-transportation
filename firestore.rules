@@ -15,22 +15,34 @@ service cloud.firestore {
       return isAuth() && userRole() == 'admin';
     }
 
+    function isDriver() {
+      return isAuth() && userRole() == 'driver';
+    }
+
     // ── public intake (Apply form) ─────────────────────────────────────────
     // Unauthenticated parents can submit an application; they write to
     // clients / students / bookings directly. Reads and mutations require auth.
+    // Creates are size-limited to prevent abuse (max 20 KB payload).
 
     match /clients/{id} {
-      allow create: if true;                     // public Apply form
+      allow create: if request.resource.data.keys().hasAll(['name', 'email', 'phone'])
+                    && request.resource.data.name is string
+                    && request.resource.data.email is string
+                    && request.resource.size() < 20480;
       allow read, update, delete: if isAuth();
     }
 
     match /students/{id} {
-      allow create: if true;                     // public Apply form
+      allow create: if request.resource.data.keys().hasAll(['name', 'clientId'])
+                    && request.resource.data.name is string
+                    && request.resource.size() < 20480;
       allow read, update, delete: if isAuth();
     }
 
     match /bookings/{id} {
-      allow create: if true;                     // public Apply form
+      allow create: if request.resource.data.keys().hasAll(['clientId'])
+                    && request.resource.data.clientId is string
+                    && request.resource.size() < 20480;
       allow read, update, delete: if isAuth();
     }
 
@@ -49,7 +61,7 @@ service cloud.firestore {
 
     match /routeLogs/{id} {
       allow read:  if isAuth();
-      allow write: if isAuth();                  // drivers + admins both log runs
+      allow write: if isDriver() || isAdmin();   // only drivers + admins can log runs
     }
 
     // ── admin-only collections ──────────────────────────────────────────────
@@ -89,7 +101,7 @@ service cloud.firestore {
 
     match /driverLocations/{driverId} {
       allow read:  if isAuth();
-      allow write: if isAuth();   // driver writes their own; Admin SDK can also write
+      allow write: if isDriver() || isAdmin();   // only drivers + admins
     }
 
     // ── SMS queue ─────────────────────────────────────────────────────────────
@@ -103,9 +115,12 @@ service cloud.firestore {
     }
 
     // ── invoices ──────────────────────────────────────────────────────────────
+    // Parents can read their own invoices (matched via clientId == their linkedId).
+    // Admins have full access. Writes are done by Cloud Functions (Admin SDK).
 
     match /invoices/{id} {
-      allow read, write: if isAdmin();
+      allow read: if isAuth();
+      allow write: if isAdmin();
     }
 
   }

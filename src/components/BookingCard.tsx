@@ -2,8 +2,7 @@ import { useDraggable } from '@dnd-kit/core';
 import { formatDistanceToNow } from 'date-fns';
 import { School } from 'lucide-react';
 
-const DAY_LABELS = ['M', 'T', 'W', 'Th', 'F'];
-const DAY_KEYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
+import { DAY_LABELS, DAY_KEYS } from '../utils/dates';
 
 function formatCurrency(n: number) {
   return n ? `$${n.toFixed(2)}/wk` : '--';

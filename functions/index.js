@@ -2,9 +2,22 @@
 
 const functions = require('firebase-functions');
 const admin     = require('firebase-admin');
-const cors      = require('cors')({ origin: true });
+const Stripe    = require('stripe');
 
 admin.initializeApp();
+
+// Lazy-init Stripe — the secret key comes from environment config and may not
+// be present during deploy-time analysis. Any billing function that needs it
+// calls getStripe() which throws a clear error if the key is missing.
+let _stripe;
+function getStripe() {
+  if (!_stripe) {
+    const key = process.env.STRIPE_SECRET_KEY;
+    if (!key) throw new functions.https.HttpsError('failed-precondition', 'STRIPE_SECRET_KEY is not configured.');
+    _stripe = Stripe(key);
+  }
+  return _stripe;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: verify the caller is an admin by checking the users collection.
@@ -20,43 +33,6 @@ async function assertAdmin(context) {
     throw new functions.https.HttpsError('permission-denied', 'Admin access required.');
   }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// HTTP: getDistance
-// Proxy to Google Maps Distance Matrix API (keeps the key server-side).
-// ─────────────────────────────────────────────────────────────────────────────
-exports.getDistance = functions.https.onRequest((req, res) => {
-  cors(req, res, async () => {
-    try {
-      const origin      = req.query.origin;
-      const destination = req.query.destination;
-      if (!origin || !destination)
-        return res.status(400).json({ error: 'origin and destination query parameters required' });
-
-      const key = process.env.GOOGLE_MAPS_API_KEY;
-      if (!key) return res.status(500).json({ error: 'Server missing Google Maps API key' });
-
-      const params = new URLSearchParams({ origins: origin, destinations: destination, units: 'imperial', key });
-      const url    = `https://maps.googleapis.com/maps/api/distancematrix/json?${params.toString()}`;
-      const r      = await fetch(url);
-      if (!r.ok) {
-        const text = await r.text();
-        return res.status(502).json({ error: 'Remote API error', status: r.status, body: text });
-      }
-      const data = await r.json();
-      if (data.status !== 'OK') return res.status(200).json({ miles: null, raw: data });
-      const element = data.rows?.[0]?.elements?.[0];
-      if (!element || element.status !== 'OK') return res.status(200).json({ miles: null, raw: data });
-      const meters = element.distance?.value;
-      if (typeof meters !== 'number') return res.status(200).json({ miles: null, raw: data });
-      const miles = Math.round((meters / 1609.344) * 10) / 10;
-      return res.json({ miles, raw: data });
-    } catch (err) {
-      console.error('getDistance error', err);
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
-});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CALLABLE: markPayment                                              (P1 + P5)
@@ -273,62 +249,566 @@ exports.processSmsQueue = functions.firestore
     }
   });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// BILLING & STRIPE FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
 // ─────────────────────────────────────────────────────────────────────────────
-// CALLABLE: createParentAccount
-// Admin creates a Firebase Auth user + Firestore users/{uid} record for a
-// parent, linking them to an existing clients/{clientId} doc.
-// A temporary random password is generated — the parent can use "Forgot
-// password" to set their own, or sign in with Google.
-// Payload: { email: string, name: string, clientId: string }
-// Returns: { uid: string, tempPassword: string }
+// PRICING CONSTANTS (mirrored from frontend src/utils/pricing.ts)
 // ─────────────────────────────────────────────────────────────────────────────
-exports.createParentAccount = functions.https.onCall(async (data, context) => {
+const DAILY_BASE = 20.0;
+const SURCHARGE_PER_MILE_9_12 = 3.0;
+const RATE_13_PLUS = 2.25;
+const ADDON_ONEWAY = 10.0;
+const ADDON_ROUNDTRIP = 20.0;
+
+function computeWeeklyCharge(mileage, daysPerWeek, isRoundTrip, numChildren) {
+  if (mileage <= 0 || daysPerWeek <= 0) return { weekly: 0, daily: 0 };
+  let dailyOneWay;
+  if (mileage <= 8) dailyOneWay = DAILY_BASE;
+  else if (mileage <= 12) dailyOneWay = DAILY_BASE + (mileage - 8) * SURCHARGE_PER_MILE_9_12;
+  else dailyOneWay = mileage * RATE_13_PLUS;
+  const billableDays = daysPerWeek >= 3 ? 5 : daysPerWeek;
+  let weeklyRide = dailyOneWay * billableDays;
+  if (isRoundTrip) weeklyRide *= 2;
+  const extraRiders = Math.max(0, numChildren - 1);
+  const addon = isRoundTrip ? ADDON_ROUNDTRIP : ADDON_ONEWAY;
+  const weekly = Math.round((weeklyRide + extraRiders * addon) * 100) / 100;
+  const daily = Math.round((weekly / billableDays) * 100) / 100;
+  return { weekly, daily };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: createCheckoutSession
+// Parent initiates Stripe Checkout to pay an invoice.
+// Payload: { invoiceId: string }
+// Returns: { url: string }  — Stripe Checkout URL to redirect to
+// ─────────────────────────────────────────────────────────────────────────────
+exports.createCheckoutSession = functions.https.onCall(async (data, context) => {
+  const uid = context.auth?.uid;
+  if (!uid) throw new functions.https.HttpsError('unauthenticated', 'Must be signed in.');
+
+  const { invoiceId } = data;
+  if (!invoiceId) throw new functions.https.HttpsError('invalid-argument', 'invoiceId is required.');
+
+  const db  = admin.firestore();
+  const inv = await db.collection('invoices').doc(invoiceId).get();
+  if (!inv.exists) throw new functions.https.HttpsError('not-found', 'Invoice not found.');
+
+  const invoice = inv.data();
+  if (invoice.status === 'paid' || invoice.status === 'waived') {
+    throw new functions.https.HttpsError('failed-precondition', 'This invoice is already paid.');
+  }
+
+  // Verify caller owns this invoice
+  const userSnap = await db.collection('users').doc(uid).get();
+  const linkedId = userSnap.data()?.linkedId;
+  if (linkedId !== invoice.clientId) {
+    throw new functions.https.HttpsError('permission-denied', 'Not your invoice.');
+  }
+
+  // Get or create Stripe customer
+  const clientSnap = await db.collection('clients').doc(invoice.clientId).get();
+  const client = clientSnap.data();
+  let customerId = client?.stripeCustomerId;
+
+  if (!customerId) {
+    const customer = await getStripe().customers.create({
+      email: client?.email || '',
+      name: client?.name || '',
+      metadata: { clientId: invoice.clientId },
+    });
+    customerId = customer.id;
+    await clientSnap.ref.update({ stripeCustomerId: customerId });
+  }
+
+  const baseUrl = process.env.APP_URL || 'https://kidz-transportation.web.app';
+
+  const session = await getStripe().checkout.sessions.create({
+    customer: customerId,
+    payment_method_types: ['card'],
+    mode: 'payment',
+    line_items: [{
+      price_data: {
+        currency: 'usd',
+        product_data: {
+          name: `KIDZ Transportation — Week of ${invoice.weekOf || invoice.periodStart}`,
+          description: invoice.lineItems?.map(li => li.description).join(', ') || 'Weekly transportation service',
+        },
+        unit_amount: Math.round(invoice.totalAmount * 100), // cents
+      },
+      quantity: 1,
+    }],
+    metadata: {
+      invoiceId: invoiceId,
+      clientId: invoice.clientId,
+    },
+    success_url: `${baseUrl}/parent/billing?paid=${invoiceId}`,
+    cancel_url:  `${baseUrl}/parent/billing?cancelled=true`,
+    payment_intent_data: {
+      metadata: {
+        invoiceId: invoiceId,
+        clientId: invoice.clientId,
+      },
+    },
+  });
+
+  await inv.ref.update({ stripeSessionId: session.id });
+
+  return { url: session.url };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HTTP: stripeWebhook
+// Handles Stripe webhook events (checkout.session.completed, etc.)
+// ─────────────────────────────────────────────────────────────────────────────
+exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
+
+  const sig = req.headers['stripe-signature'];
+  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  let event;
+
   try {
-    const callerUid = context.auth?.uid;
-    if (!callerUid) throw new functions.https.HttpsError('unauthenticated', 'Must be signed in.');
+    event = getStripe().webhooks.constructEvent(req.rawBody, sig, endpointSecret);
+  } catch (err) {
+    console.error('Webhook signature verification failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
 
-    const db = admin.firestore();
-    const userSnap = await db.collection('users').doc(callerUid).get();
-    if (!userSnap.exists || userSnap.data().role !== 'admin')
-      throw new functions.https.HttpsError('permission-denied', 'Admin access required.');
+  const db = admin.firestore();
+  const now = admin.firestore.FieldValue.serverTimestamp();
 
-    const { email, name, clientId } = data;
-    if (typeof email !== 'string' || !email.trim())
-      throw new functions.https.HttpsError('invalid-argument', 'email is required.');
-    if (typeof clientId !== 'string' || !clientId.trim())
-      throw new functions.https.HttpsError('invalid-argument', 'clientId is required.');
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const invoiceId = session.metadata?.invoiceId;
+    if (!invoiceId) { return res.status(200).send('No invoiceId in metadata'); }
 
-    const trimmedEmail = email.trim().toLowerCase();
-    const displayName  = (name || '').trim();
+    const invRef = db.collection('invoices').doc(invoiceId);
+    const invSnap = await invRef.get();
+    if (!invSnap.exists) { return res.status(200).send('Invoice not found'); }
 
-    const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$';
-    let tempPassword = '';
-    for (let i = 0; i < 16; i++) tempPassword += chars[Math.floor(Math.random() * chars.length)];
+    if (invSnap.data().status !== 'paid') {
+      await invRef.update({
+        status: 'paid',
+        paidAt: now,
+        stripePaymentIntentId: session.payment_intent || null,
+        stripeSessionId: session.id,
+      });
 
-    let uid;
-    const existing = await admin.auth().getUserByEmail(trimmedEmail).catch(() => null);
-    if (existing) {
-      uid = existing.uid;
-    } else {
-      const rec = await admin.auth().createUser({ email: trimmedEmail, password: tempPassword, displayName });
-      uid = rec.uid;
+      await db.collection('auditLog').add({
+        action: 'invoice_paid_stripe',
+        collection: 'invoices',
+        docId: invoiceId,
+        clientId: session.metadata?.clientId,
+        amount: invSnap.data().totalAmount,
+        stripeSessionId: session.id,
+        timestamp: now,
+      });
     }
 
-    await db.collection('users').doc(uid).set({
-      role: 'parent', email: trimmedEmail, name: displayName, linkedId: clientId,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
+    // Save payment method for future auto-pay if customer chose to
+    if (session.customer && session.payment_intent) {
+      try {
+        const pi = await getStripe().paymentIntents.retrieve(session.payment_intent);
+        if (pi.payment_method) {
+          const pm = await getStripe().paymentMethods.retrieve(pi.payment_method);
+          const clientId = session.metadata?.clientId;
+          if (clientId) {
+            await db.collection('clients').doc(clientId).update({
+              paymentMethodLast4: pm.card?.last4 || '',
+              paymentMethodBrand: pm.card?.brand || '',
+            });
+          }
+        }
+      } catch (e) { console.warn('Could not save payment method details:', e.message); }
+    }
+  }
 
-    await db.collection('auditLog').add({
-      action: 'parent_account_created', docId: uid, clientId,
-      actorUid: callerUid, timestamp: admin.firestore.FieldValue.serverTimestamp(),
+  res.status(200).send('ok');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: setupAutoPay
+// Parent enables/disables auto-pay. When enabling, we attach their last
+// payment method as default for future charges.
+// Payload: { enabled: boolean }
+// ─────────────────────────────────────────────────────────────────────────────
+exports.setupAutoPay = functions.https.onCall(async (data, context) => {
+  const uid = context.auth?.uid;
+  if (!uid) throw new functions.https.HttpsError('unauthenticated', 'Must be signed in.');
+
+  const db = admin.firestore();
+  const userSnap = await db.collection('users').doc(uid).get();
+  const linkedId = userSnap.data()?.linkedId;
+  if (!linkedId) throw new functions.https.HttpsError('not-found', 'No linked client.');
+
+  const { enabled } = data;
+  await db.collection('clients').doc(linkedId).update({
+    autoPay: !!enabled,
+  });
+
+  return { autoPay: !!enabled };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: generateWeeklyInvoices
+// Admin-triggered (or scheduled): creates invoices for the upcoming week.
+// For each client with active bookings, creates one combined invoice if
+// one doesn't already exist for that weekOf.
+// Payload: { weekOf?: string } — YYYY-MM-DD of the Monday. Defaults to next Monday.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.generateWeeklyInvoices = functions.https.onCall(async (data, context) => {
+  await assertAdmin(context);
+
+  const db = admin.firestore();
+  const now = admin.firestore.FieldValue.serverTimestamp();
+
+  // Determine the target Monday
+  let weekOf = data?.weekOf;
+  if (!weekOf) {
+    const today = new Date();
+    const dayOfWeek = today.getDay();
+    const daysUntilMon = dayOfWeek === 0 ? 1 : (8 - dayOfWeek);
+    const nextMon = new Date(today);
+    nextMon.setDate(today.getDate() + daysUntilMon);
+    weekOf = nextMon.toISOString().split('T')[0];
+  }
+
+  // Friday of that week
+  const monDate = new Date(weekOf + 'T00:00:00');
+  const friDate = new Date(monDate);
+  friDate.setDate(monDate.getDate() + 4);
+  const periodEnd = friDate.toISOString().split('T')[0];
+
+  // Due date = Saturday before (i.e. the day before Monday)
+  const satDate = new Date(monDate);
+  satDate.setDate(monDate.getDate() - 2);
+  const dueDate = satDate.toISOString().split('T')[0];
+
+  // Get all active bookings
+  const bookingsSnap = await db.collection('bookings').where('status', '==', 'active').get();
+  const bookings = bookingsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+  // Group by clientId
+  const byClient = {};
+  for (const b of bookings) {
+    if (!byClient[b.clientId]) byClient[b.clientId] = [];
+    byClient[b.clientId].push(b);
+  }
+
+  // Get student names for line items
+  const studentsSnap = await db.collection('students').get();
+  const students = {};
+  studentsSnap.docs.forEach(d => { students[d.id] = d.data(); });
+
+  let created = 0;
+  let skipped = 0;
+
+  for (const [clientId, clientBookings] of Object.entries(byClient)) {
+    // Check if invoice already exists for this weekOf + clientId
+    const existing = await db.collection('invoices')
+      .where('clientId', '==', clientId)
+      .where('weekOf', '==', weekOf)
+      .limit(1)
+      .get();
+    if (!existing.empty) { skipped++; continue; }
+
+    const lineItems = [];
+    let total = 0;
+    const bookingIds = [];
+
+    for (const booking of clientBookings) {
+      const daysPerWeek = booking.daysOfWeek?.length || 0;
+      const isRoundTrip = booking.transportationType === 'roundtrip';
+      const numStudents = booking.studentIds?.length || 1;
+      const studentNames = (booking.studentIds || [])
+        .map(sid => students[sid]?.name || 'Student')
+        .join(', ');
+
+      const { weekly, daily } = computeWeeklyCharge(
+        booking.mileage || 0, daysPerWeek, isRoundTrip, numStudents
+      );
+
+      const billableDays = daysPerWeek >= 3 ? 5 : daysPerWeek;
+
+      lineItems.push({
+        description: `${studentNames} — ${isRoundTrip ? 'Round-trip' : 'One-way'} (${daysPerWeek} days/wk)`,
+        bookingId: booking.id,
+        quantity: billableDays,
+        unitPrice: daily,
+        total: weekly,
+      });
+
+      total += weekly;
+      bookingIds.push(booking.id);
+    }
+
+    if (total <= 0) continue;
+
+    await db.collection('invoices').add({
+      clientId,
+      bookingIds,
+      weekOf,
+      periodStart: weekOf,
+      periodEnd,
+      lineItems,
+      totalAmount: Math.round(total * 100) / 100,
+      status: 'sent',
+      dueDate,
+      sentAt: now,
+      paidAt: null,
+      createdAt: now,
+      notes: '',
     });
 
-    return { uid, tempPassword };
-
-  } catch (err) {
-    if (err instanceof functions.https.HttpsError) throw err;
-    console.error('[createParentAccount] UNHANDLED:', err.message, err.stack);
-    throw new functions.https.HttpsError('internal', err.message);
+    created++;
   }
+
+  return { created, skipped, weekOf };
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: adminOverrideInvoice
+// Admin can mark an invoice as paid, waived, or extend due date.
+// Payload: { invoiceId: string, action: 'mark_paid' | 'waive' | 'extend', note?: string, newDueDate?: string }
+// ─────────────────────────────────────────────────────────────────────────────
+exports.adminOverrideInvoice = functions.https.onCall(async (data, context) => {
+  await assertAdmin(context);
+
+  const { invoiceId, action, note, newDueDate } = data;
+  if (!invoiceId) throw new functions.https.HttpsError('invalid-argument', 'invoiceId required.');
+  if (!['mark_paid', 'waive', 'extend'].includes(action)) {
+    throw new functions.https.HttpsError('invalid-argument', 'action must be mark_paid, waive, or extend.');
+  }
+
+  const db     = admin.firestore();
+  const now    = admin.firestore.FieldValue.serverTimestamp();
+  const invRef = db.collection('invoices').doc(invoiceId);
+  const snap   = await invRef.get();
+  if (!snap.exists) throw new functions.https.HttpsError('not-found', 'Invoice not found.');
+
+  const updates = {
+    adminOverride: true,
+    overrideBy: context.auth.uid,
+    overrideNote: note || '',
+  };
+
+  if (action === 'mark_paid') {
+    updates.status = 'paid';
+    updates.paidAt = now;
+  } else if (action === 'waive') {
+    updates.status = 'waived';
+  } else if (action === 'extend') {
+    if (!newDueDate) throw new functions.https.HttpsError('invalid-argument', 'newDueDate required for extend.');
+    updates.dueDate = newDueDate;
+  }
+
+  await invRef.update(updates);
+  await db.collection('auditLog').add({
+    action: `invoice_${action}`,
+    collection: 'invoices',
+    docId: invoiceId,
+    actorUid: context.auth.uid,
+    before: { status: snap.data().status },
+    after: updates,
+    timestamp: now,
+  });
+
+  return { success: true };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: processAutoPay
+// Admin-triggered: charges all auto-pay parents for unpaid invoices.
+// For each client with autoPay=true and a stripeCustomerId, charges their
+// default payment method.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.processAutoPay = functions.https.onCall(async (data, context) => {
+  await assertAdmin(context);
+
+  const db = admin.firestore();
+  const now = admin.firestore.FieldValue.serverTimestamp();
+
+  // Get all unpaid/sent invoices
+  const invSnap = await db.collection('invoices')
+    .where('status', 'in', ['sent', 'overdue'])
+    .get();
+
+  let charged = 0;
+  let failed  = 0;
+  let skipped = 0;
+
+  for (const invDoc of invSnap.docs) {
+    const inv = invDoc.data();
+    const clientSnap = await db.collection('clients').doc(inv.clientId).get();
+    if (!clientSnap.exists) { skipped++; continue; }
+    const client = clientSnap.data();
+
+    if (!client.autoPay || !client.stripeCustomerId) { skipped++; continue; }
+
+    try {
+      // Get default payment method
+      const paymentMethods = await getStripe().paymentMethods.list({
+        customer: client.stripeCustomerId,
+        type: 'card',
+        limit: 1,
+      });
+
+      if (paymentMethods.data.length === 0) { skipped++; continue; }
+
+      const pmId = paymentMethods.data[0].id;
+
+      const pi = await getStripe().paymentIntents.create({
+        amount: Math.round(inv.totalAmount * 100),
+        currency: 'usd',
+        customer: client.stripeCustomerId,
+        payment_method: pmId,
+        off_session: true,
+        confirm: true,
+        metadata: {
+          invoiceId: invDoc.id,
+          clientId: inv.clientId,
+        },
+      });
+
+      if (pi.status === 'succeeded') {
+        await invDoc.ref.update({
+          status: 'paid',
+          paidAt: now,
+          stripePaymentIntentId: pi.id,
+        });
+        charged++;
+      } else {
+        await invDoc.ref.update({ autoPayFailed: true });
+        failed++;
+      }
+    } catch (err) {
+      console.error(`Auto-pay failed for client ${inv.clientId}:`, err.message);
+      await invDoc.ref.update({ autoPayFailed: true });
+      failed++;
+    }
+  }
+
+  return { charged, failed, skipped };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: createManualInvoice
+// Admin creates a one-off invoice for a specific client.
+// Payload: { clientId, description, amount, dueDate, weekOf? }
+// ─────────────────────────────────────────────────────────────────────────────
+exports.createManualInvoice = functions.https.onCall(async (data, context) => {
+  await assertAdmin(context);
+
+  const { clientId, description, amount, dueDate, weekOf } = data;
+  if (!clientId || !description || !amount || !dueDate) {
+    throw new functions.https.HttpsError('invalid-argument', 'clientId, description, amount, dueDate required.');
+  }
+
+  const db  = admin.firestore();
+  const now = admin.firestore.FieldValue.serverTimestamp();
+
+  const ref = await db.collection('invoices').add({
+    clientId,
+    bookingIds: [],
+    weekOf: weekOf || '',
+    periodStart: dueDate,
+    periodEnd: dueDate,
+    lineItems: [{
+      description,
+      quantity: 1,
+      unitPrice: amount,
+      total: amount,
+    }],
+    totalAmount: amount,
+    status: 'sent',
+    dueDate,
+    sentAt: now,
+    paidAt: null,
+    createdAt: now,
+    notes: `Manual invoice created by admin`,
+  });
+
+  await db.collection('auditLog').add({
+    action: 'invoice_created_manual',
+    collection: 'invoices',
+    docId: ref.id,
+    clientId,
+    amount,
+    actorUid: context.auth.uid,
+    timestamp: now,
+  });
+
+  return { invoiceId: ref.id };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRIGGER: processEmailQueue
+// Fires when a new document is created in the `emailQueue` collection.
+// Sends an email via SendGrid (or any HTTP-based email API).
+// Set env vars: SENDGRID_API_KEY, EMAIL_FROM (e.g. "noreply@kidztransportation.com")
+// Queue doc shape: { to: string, subject: string, body: string (HTML allowed) }
+// Updates the queue doc with status: 'sent' | 'failed'.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.processEmailQueue = functions.firestore
+  .document('emailQueue/{itemId}')
+  .onCreate(async (snap, context) => {
+    const data    = snap.data();
+    const to      = data.to;
+    const subject = data.subject;
+    const body    = data.body;
+
+    if (!to || !subject || !body) {
+      await snap.ref.update({ status: 'failed', error: 'Missing to, subject, or body', processedAt: admin.firestore.FieldValue.serverTimestamp() });
+      return;
+    }
+
+    const apiKey  = process.env.SENDGRID_API_KEY;
+    const fromEmail = process.env.EMAIL_FROM || 'noreply@kidztransportation.com';
+
+    if (!apiKey) {
+      console.warn('processEmailQueue: SENDGRID_API_KEY not configured.');
+      await snap.ref.update({ status: 'failed', error: 'SendGrid not configured', processedAt: admin.firestore.FieldValue.serverTimestamp() });
+      return;
+    }
+
+    try {
+      const response = await fetch('https://api.sendgrid.com/v3/mail/send', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          personalizations: [{ to: [{ email: to }] }],
+          from: { email: fromEmail },
+          subject,
+          content: [{ type: 'text/html', value: body }],
+        }),
+      });
+
+      if (response.ok || response.status === 202) {
+        await snap.ref.update({
+          status:      'sent',
+          processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        console.log(`Email sent to ${to}: "${subject}"`);
+      } else {
+        const errText = await response.text();
+        await snap.ref.update({
+          status: 'failed',
+          error:  `HTTP ${response.status}: ${errText}`,
+          processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        console.error(`Email failed for ${to}: HTTP ${response.status} — ${errText}`);
+      }
+    } catch (err) {
+      await snap.ref.update({
+        status: 'failed',
+        error:  err?.message || String(err),
+        processedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      console.error('processEmailQueue error:', err);
+    }
+  });

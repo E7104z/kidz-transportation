@@ -9,6 +9,7 @@ import Drivers from './pages/admin/Drivers';
 import Payroll from './pages/admin/Payroll';
 import Import from './pages/admin/Import';
 import Dispatch from './pages/admin/Dispatch';
+import AdminBilling from './pages/admin/AdminBilling';
 import DriverDashboard from './pages/driver/DriverDashboard';
 import DriverSetup from './pages/driver/DriverSetup';
 import ParentSetup from './pages/parent/ParentSetup';
@@ -47,7 +48,7 @@ function App() {
                     <Route path="clients" element={<Clients />} />
                     <Route path="drivers" element={<Drivers />} />
                     <Route path="payroll"   element={<Payroll />} />
-                    <Route path="routes"    element={<Navigate to="/admin/dispatch" replace />} />
+                    <Route path="billing"   element={<AdminBilling />} />
                     <Route path="import"    element={<Import />} />
                   </Routes>
                 </AdminLayout>
@@ -76,7 +77,6 @@ function App() {
                       <Route path="tracking" element={<LiveTracking />} />
                       <Route path="billing" element={<Billing />} />
                       <Route path="profile" element={<ParentProfile />} />
-                      <Route path="status" element={<Navigate to="/parent/dashboard" replace />} />
                     </Routes>
                   </ParentLayout>
                 </ParentDataProvider>

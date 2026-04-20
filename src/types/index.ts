@@ -9,6 +9,11 @@ export interface Client {
   phone: string;
   address: string;
   createdAt: Date;
+  // Billing (populated by Stripe Cloud Functions)
+  stripeCustomerId?: string;
+  autoPay?: boolean;
+  paymentMethodLast4?: string;
+  paymentMethodBrand?: string;
 }
 
 export interface Student {
@@ -155,28 +160,45 @@ export interface SmsQueueItem {
 }
 
 // Invoice (P6)
-export type InvoiceStatus = 'draft' | 'sent' | 'paid' | 'overdue';
+export type InvoiceStatus = 'draft' | 'sent' | 'paid' | 'overdue' | 'waived';
 
 export interface Invoice {
   id: string;
   clientId: string;
-  bookingId: string;
-  periodStart: string;  // YYYY-MM-DD
+  bookingIds: string[];         // combined: all active bookings for this parent
+  weekOf: string;               // "YYYY-MM-DD" — Monday of the service week
+  periodStart: string;          // YYYY-MM-DD
   periodEnd: string;
   lineItems: InvoiceLineItem[];
   totalAmount: number;
   status: InvoiceStatus;
-  dueDate: string;
+  dueDate: string;              // Saturday before the service week
   sentAt: Timestamp | null;
   paidAt: Timestamp | null;
   createdAt: Timestamp;
   notes: string;
+  // Stripe
+  stripeSessionId?: string;
+  stripePaymentIntentId?: string;
+  // Admin override
+  adminOverride?: boolean;
+  overrideNote?: string;
+  overrideBy?: string;          // admin uid
 }
 
 export interface InvoiceLineItem {
   description: string;
+  bookingId?: string;
   date?: string;
   quantity: number;  // days
   unitPrice: number;
   total: number;
+}
+
+// Client billing extensions
+export interface ClientBilling {
+  stripeCustomerId?: string;
+  autoPay?: boolean;
+  paymentMethodLast4?: string;
+  paymentMethodBrand?: string;
 }

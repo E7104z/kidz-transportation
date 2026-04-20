@@ -167,15 +167,7 @@ const RouteCard: React.FC<{ route: DispatchRoute; isSelected: boolean; onClick: 
 
 // ── Route panel helpers ───────────────────────────────────────────────────────
 
-const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-
-const toDate = (val: unknown): Date => {
-  if (!val) return new Date(0);
-  if (val instanceof Date) return val;
-  if (typeof (val as { toDate?: () => Date }).toDate === 'function')
-    return (val as { toDate: () => Date }).toDate();
-  return new Date(val as string | number);
-};
+import { toDate, DAY_NAMES } from '../../utils/dates';
 
 // ── Routes panel (admin log editor, embedded in Dispatch) ─────────────────────
 

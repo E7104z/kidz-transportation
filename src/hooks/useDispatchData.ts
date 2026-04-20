@@ -66,7 +66,7 @@ export interface DispatchData {
   setHistoryDays: (n: number) => void;
 }
 
-const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+import { DAY_NAMES } from '../utils/dates';
 
 function now() { return new Date(); }
 

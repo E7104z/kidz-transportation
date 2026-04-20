@@ -17,13 +17,7 @@ import {
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
-const toDate = (val: Date | unknown): Date => {
-  if (!val) return new Date(0);
-  if (val instanceof Date) return val;
-  if (typeof (val as { toDate?: () => Date }).toDate === 'function')
-    return (val as { toDate: () => Date }).toDate();
-  return new Date(val as string | number);
-};
+import { toDate, DAY_ABBR, DAY_NAMES } from '../../utils/dates';
 
 const fmt  = (d: Date) => format(d, 'yyyy-MM-dd');
 const fmtD = (d: Date) => format(d, 'MMM d');
@@ -54,8 +48,7 @@ function buildRange(mode: PeriodMode, offset: number): PeriodRange {
   return { start: startOfYear(ref), end: endOfYear(ref), label: format(ref, 'yyyy') };
 }
 
-const DAY_ABBR = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
-const DAY_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const DAY_FULL = DAY_NAMES;
 
 // ── component ────────────────────────────────────────────────────────────────
 

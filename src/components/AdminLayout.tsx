@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Columns, Users, Car, DollarSign, Upload, Menu, X, LogOut, Radio } from 'lucide-react';
+import { LayoutDashboard, Columns, Users, Car, DollarSign, Upload, Menu, X, LogOut, Radio, Receipt } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import logo from '../assets/KIDZ logo4 site.png';
 
@@ -21,6 +21,7 @@ const AdminLayout: React.FC<React.PropsWithChildren> = ({ children }) => {
     { to: '/admin/clients',   label: 'Clients',   icon: Users },
     { to: '/admin/drivers',   label: 'Drivers',   icon: Car },
     { to: '/admin/payroll',   label: 'Payroll',   icon: DollarSign },
+    { to: '/admin/billing',   label: 'Billing',   icon: Receipt },
     { to: '/admin/import',    label: 'Import',    icon: Upload },
   ];
 

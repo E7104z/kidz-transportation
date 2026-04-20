@@ -245,6 +245,20 @@ const DriverDashboard: React.FC = () => {
     });
   }, [todayAssignments, bookings, todayLogMap]);
 
+  // True when any route has students picked up but not yet dropped off
+  const routeInProgress = useMemo(() => {
+    return todayAssignments.some(a => {
+      const log = todayLogMap[a.bookingId];
+      if (!log || log.ran === false) return false;
+      const booking = bookings[a.bookingId];
+      if (!booking) return false;
+      const sids = booking.studentIds ?? [];
+      const evts = (log.studentEvents ?? {}) as Record<string, { status: string }>;
+      const pickedUp = sids.filter(sid => evts[sid]?.status === 'picked_up').length;
+      return pickedUp > 0;
+    });
+  }, [todayAssignments, bookings, todayLogMap]);
+
   // Remove GPS location from Firestore once all routes are done — stops showing on Dispatch map
   useEffect(() => {
     if (!linkedId || !allDoneToday || todayAssignments.length === 0) return;
@@ -350,11 +364,19 @@ const DriverDashboard: React.FC = () => {
   };
 
   const toggleGps = () => {
+    if (gpsActive && routeInProgress) {
+      toast.error('Cannot stop GPS while a route is in progress');
+      return;
+    }
     setGpsActive(v => !v);
     toast(gpsActive ? 'GPS stopped — location hidden from dispatch' : 'GPS started — sharing location', { icon: gpsActive ? '📍' : '🛰️' });
   };
 
   const handleLogout = async () => {
+    if (routeInProgress) {
+      toast.error('Cannot log out while a route is in progress');
+      return;
+    }
     if (linkedId) {
       try { await deleteDoc(doc(db, 'driverLocations', linkedId)); } catch {}
     }
