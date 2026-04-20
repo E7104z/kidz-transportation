@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { collection, doc, writeBatch, serverTimestamp } from 'firebase/firestore';
+import { collection, doc, writeBatch, serverTimestamp, query, where, getDocs } from 'firebase/firestore';
 import { db } from '../../services/firebase';
 import type { TransportationType, BookingStatus } from '../../types';
 import { Upload, Plus, Trash2, CheckCircle } from 'lucide-react';
@@ -364,22 +364,31 @@ const Import: React.FC = () => {
     setImporting(true);
     try {
       const batch = writeBatch(db);
+      const trimmedEmail = parent.email.trim().toLowerCase();
 
-      const clientRef = doc(collection(db, 'clients'));
-      batch.set(clientRef, {
-        name: parent.name,
-        email: parent.email.trim().toLowerCase(),
-        phone: parent.phone,
-        address: parent.address,
-        createdAt: serverTimestamp(),
-      });
+      // Deduplicate: reuse existing client if one exists with this email
+      let clientId: string;
+      const existingClientSnap = await getDocs(query(collection(db, 'clients'), where('email', '==', trimmedEmail)));
+      if (!existingClientSnap.empty) {
+        clientId = existingClientSnap.docs[0].id;
+      } else {
+        const clientRef = doc(collection(db, 'clients'));
+        batch.set(clientRef, {
+          name: parent.name,
+          email: trimmedEmail,
+          phone: parent.phone,
+          address: parent.address,
+          createdAt: serverTimestamp(),
+        });
+        clientId = clientRef.id;
+      }
 
       const studentRefs = students
         .filter(s => s.name.trim())
         .map(s => {
           const ref = doc(collection(db, 'students'));
           batch.set(ref, {
-            clientId: clientRef.id,
+            clientId,
             name: s.name,
             dob: s.dob,
             age: parseInt(s.age) || 0,
@@ -396,7 +405,7 @@ const Import: React.FC = () => {
 
       const bookingRef = doc(collection(db, 'bookings'));
       batch.set(bookingRef, {
-        clientId: clientRef.id,
+        clientId,
         studentIds: studentRefs.map(r => r.id),
         pickupAddress: booking.pickupAddress,
         dropoffAddress: booking.dropoffAddress,

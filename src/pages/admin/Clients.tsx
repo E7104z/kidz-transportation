@@ -5,7 +5,6 @@ import {
   doc,
   updateDoc,
   addDoc,
-  setDoc,
   getDocs,
   writeBatch,
   serverTimestamp,
@@ -14,8 +13,6 @@ import {
   orderBy,
 } from 'firebase/firestore';
 import { format } from 'date-fns';
-import { initializeApp, deleteApp } from 'firebase/app';
-import { getAuth as getFirebaseAuth, createUserWithEmailAndPassword, sendPasswordResetEmail } from 'firebase/auth';
 import {
   Users,
   Search,
@@ -31,7 +28,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
-import { db, firebaseConfig } from '../../services/firebase';
+import { db } from '../../services/firebase';
 import { computeWeeklyCharge } from '../../utils/pricing';
 import { getMileage } from '../../services/mileageService';
 import { generateAndSaveContract, queueContractEmail, fetchContract } from '../../services/contractService';
@@ -111,21 +108,30 @@ const AddClientModal: React.FC<AddClientModalProps> = ({ onClose }) => {
     if (students.some(s => !s.name.trim())) { toast.error('Each student must have a name'); return; }
     setSubmitting(true);
     try {
-      const clientRef = await addDoc(collection(db, 'clients'), {
-        name: parentName.trim(), email: email.trim().toLowerCase(), phone: phone.trim(),
-        address: homeAddress.trim(), createdAt: serverTimestamp(),
-      });
+      const trimmedEmail = email.trim().toLowerCase();
+      // Deduplicate: reuse existing client if one exists with this email
+      const existingClientSnap = await getDocs(query(collection(db, 'clients'), where('email', '==', trimmedEmail)));
+      let clientId: string;
+      if (!existingClientSnap.empty) {
+        clientId = existingClientSnap.docs[0].id;
+      } else {
+        const clientRef = await addDoc(collection(db, 'clients'), {
+          name: parentName.trim(), email: trimmedEmail, phone: phone.trim(),
+          address: homeAddress.trim(), createdAt: serverTimestamp(),
+        });
+        clientId = clientRef.id;
+      }
       const studentIds: string[] = [];
       for (const s of students) {
         const sRef = await addDoc(collection(db, 'students'), {
-          clientId: clientRef.id, name: s.name.trim(), dob: s.dob, age: 0, grade: s.grade,
+          clientId, name: s.name.trim(), dob: s.dob, age: 0, grade: s.grade,
           schoolName: s.schoolName, schoolContact: s.schoolContact, allergies: s.allergies,
           medicalNotes: s.medicalNotes, specialRequirements: '', phone: '',
         });
         studentIds.push(sRef.id);
       }
       await addDoc(collection(db, 'bookings'), {
-        clientId: clientRef.id, studentIds, pickupAddress: pickupAddress.trim(),
+        clientId, studentIds, pickupAddress: pickupAddress.trim(),
         dropoffAddress: dropoffAddress.trim(), transportationType, daysOfWeek,
         schoolStartTime, schoolEndTime,
         serviceStartDate: serviceStartDate ? new Date(serviceStartDate) : null,
@@ -135,68 +141,11 @@ const AddClientModal: React.FC<AddClientModalProps> = ({ onClose }) => {
         createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
       });
 
-      // Create parent Firebase Auth account + users doc using secondary app
-      // (avoids Cloud Functions 403 from org IAM policy)
-      try {
-        const trimmedEmail = email.trim().toLowerCase();
-        const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$';
-        let tempPassword = '';
-        for (let i = 0; i < 16; i++) tempPassword += chars[Math.floor(Math.random() * chars.length)];
+      // Parent account provisioning is handled automatically by the
+      // provisionParentAccount Cloud Function (fires on clients onCreate).
+      // A password reset email is sent to the parent automatically.
 
-        let uid: string | null = null;
-        let isNewAccount = false;
-
-        try {
-          const tempApp = initializeApp(firebaseConfig, 'tempCreateUser');
-          const tempAuth = getFirebaseAuth(tempApp);
-          const { user } = await createUserWithEmailAndPassword(tempAuth, trimmedEmail, tempPassword);
-          uid = user.uid;
-          isNewAccount = true;
-          await deleteApp(tempApp);
-        } catch (createErr: any) {
-          if (createErr?.code === 'auth/email-already-in-use') {
-            // User already exists in Auth — find their Firestore users doc
-            const existingSnap = await getDocs(query(collection(db, 'users'), where('email', '==', trimmedEmail)));
-            if (!existingSnap.empty) {
-              uid = existingSnap.docs[0].id;
-            }
-            // If no Firestore doc exists, uid stays null — handled below
-          } else {
-            throw createErr;
-          }
-        }
-
-        if (uid) {
-          await setDoc(doc(db, 'users', uid), {
-            role: 'parent',
-            email: trimmedEmail,
-            name: parentName.trim(),
-            linkedId: clientRef.id,
-            createdAt: serverTimestamp(),
-          }, { merge: true });
-
-          if (isNewAccount) {
-            toast.success('Parent portal account created!');
-            alert(`Parent portal credentials:\n\nEmail: ${trimmedEmail}\nTemp password: ${tempPassword}\n\nSave this password — it won't be shown again!`);
-          } else {
-            toast.success('Existing parent account linked to this client.');
-          }
-        } else {
-          // Auth user exists but no Firestore doc — send password reset so
-          // they can sign in. Their users doc will be created on first login.
-          await updateDoc(doc(db, 'clients', clientRef.id), { parentEmail: trimmedEmail });
-          try {
-            const { auth: mainAuth } = await import('../../services/firebase');
-            await sendPasswordResetEmail(mainAuth, trimmedEmail);
-          } catch { /* best-effort */ }
-          toast.success('Client saved! This email already has an account — a password reset email was sent so they can sign in.');
-        }
-      } catch (accountErr: any) {
-        console.error('[AddClient] Parent account creation failed:', accountErr?.code, accountErr?.message);
-        toast.error(`Client saved but parent account failed: ${accountErr?.message || 'Unknown error'}`);
-      }
-
-      toast.success(`${parentName} added successfully`);
+      toast.success(`${parentName} added successfully — parent portal account will be provisioned automatically.`);
       onClose();
     } catch (err: any) {
       toast.error(err?.message ?? 'Failed to add client');

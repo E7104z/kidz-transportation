@@ -5,7 +5,7 @@ import { computeWeeklyCharge } from '../../utils/pricing';
 import { getMileage } from '../../services/mileageService';
 import { getPlacePredictions } from '../../services/placeService';
 import { db } from '../../services/firebase';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp, query, where, getDocs } from 'firebase/firestore';
 import { Bus } from 'lucide-react';
 
 type Purpose = 'School' | 'Childcare' | 'Medical' | 'Other' | '';
@@ -306,21 +306,30 @@ const Apply: React.FC = () => {
 		if (Object.keys(errs).length) { dispatch({ type: 'SET_ERRORS', value: errs }); return; }
 		dispatch({ type: 'SET_SUBMITTING', value: true });
 		try {
-			const clientRef = await addDoc(collection(db, 'clients'), {
-				name: state.parent.fullName, phone: state.parent.phone, email: state.parent.email.trim().toLowerCase(),
-				address: state.parent.address, createdAt: serverTimestamp(),
-			});
+			const trimmedEmail = state.parent.email.trim().toLowerCase();
+			// Deduplicate: reuse existing client if one exists with this email
+			const existingSnap = await getDocs(query(collection(db, 'clients'), where('email', '==', trimmedEmail)));
+			let clientId: string;
+			if (!existingSnap.empty) {
+				clientId = existingSnap.docs[0].id;
+			} else {
+				const clientRef = await addDoc(collection(db, 'clients'), {
+					name: state.parent.fullName, phone: state.parent.phone, email: trimmedEmail,
+					address: state.parent.address, createdAt: serverTimestamp(),
+				});
+				clientId = clientRef.id;
+			}
 			const studentIds = await Promise.all(state.students.map(async (s) => {
 				const ref = await addDoc(collection(db, 'students'), {
 					name: s.fullName, dob: s.dob, age: s.age, grade: s.grade,
 					schoolName: s.schoolName, schoolContact: s.schoolContact, phone: s.phone || '',
 					allergies: state.medical.allergies, medicalNotes: state.medical.specialRequirements,
-					clientId: clientRef.id, createdAt: serverTimestamp(),
+					clientId, createdAt: serverTimestamp(),
 				});
 				return ref.id;
 			}));
 			await addDoc(collection(db, 'bookings'), {
-				clientId: clientRef.id, studentIds,
+				clientId, studentIds,
 				pickupAddress: state.pickupAddress, dropoffAddress: state.dropoffAddress,
 				mileage: state.mileage ?? 0, transportationType: state.transportationType,
 				daysOfWeek: state.daysOfWeek, schoolStartTime: state.schoolStartTime,

@@ -1027,3 +1027,170 @@ exports.createMissedRouteLogs = functions.pubsub
     console.log(`createMissedRouteLogs: created=${created}, skippedExisting=${skippedExisting}`);
     return null;
   });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRIGGER: provisionParentAccount
+// Fires when a new client document is created.
+// Ensures a Firebase Auth user + Firestore users/{uid} doc exists so the
+// parent can sign in to the portal. Works for ALL three client creation
+// paths (Apply form, Admin Add Client, Admin Import).
+// ─────────────────────────────────────────────────────────────────────────────
+exports.provisionParentAccount = functions.firestore
+  .document('clients/{clientId}')
+  .onCreate(async (snap, context) => {
+    const clientId = context.params.clientId;
+    const client   = snap.data();
+    const email    = (client.email || '').trim().toLowerCase();
+
+    if (!email) {
+      console.log(`provisionParentAccount: client ${clientId} has no email, skipping.`);
+      return null;
+    }
+
+    const db  = admin.firestore();
+    const auth = admin.auth();
+
+    // Check if a users doc already links to this client (e.g. already provisioned)
+    const existingLink = await db.collection('users')
+      .where('linkedId', '==', clientId)
+      .limit(1)
+      .get();
+    if (!existingLink.empty) {
+      console.log(`provisionParentAccount: client ${clientId} already linked, skipping.`);
+      return null;
+    }
+
+    let uid;
+    let isNewAccount = false;
+
+    try {
+      // Try to find existing Auth user by email
+      const existingUser = await auth.getUserByEmail(email);
+      uid = existingUser.uid;
+      console.log(`provisionParentAccount: existing Auth user ${uid} found for ${email}`);
+    } catch (err) {
+      if (err.code === 'auth/user-not-found') {
+        // Create new Auth user with a random temp password
+        const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$';
+        let tempPassword = '';
+        for (let i = 0; i < 16; i++) tempPassword += chars[Math.floor(Math.random() * chars.length)];
+
+        const newUser = await auth.createUser({
+          email,
+          password: tempPassword,
+          displayName: client.name || '',
+        });
+        uid = newUser.uid;
+        isNewAccount = true;
+        console.log(`provisionParentAccount: created Auth user ${uid} for ${email}`);
+      } else {
+        console.error(`provisionParentAccount: error looking up ${email}:`, err);
+        return null;
+      }
+    }
+
+    // Create or merge the users doc
+    await db.collection('users').doc(uid).set({
+      role:      'parent',
+      email,
+      name:      client.name || '',
+      linkedId:  clientId,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    // Send password reset email so the parent can set their own password
+    try {
+      const resetLink = await auth.generatePasswordResetLink(email);
+      // Queue an email via the existing email queue system
+      await db.collection('emailQueue').add({
+        to:      email,
+        subject: 'Welcome to KIDZ Transportation — Set Your Password',
+        body:    `<p>Hello ${client.name || ''},</p>
+<p>Your parent portal account has been created. Click the link below to set your password and access your portal:</p>
+<p><a href="${resetLink}">Set Your Password</a></p>
+<p>Once you've set your password, you can sign in at any time to view your child's transportation details.</p>
+<p>— KIDZ Transportation</p>`,
+        status:    'pending',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      console.log(`provisionParentAccount: password reset email queued for ${email}`);
+    } catch (emailErr) {
+      console.error(`provisionParentAccount: failed to queue reset email for ${email}:`, emailErr);
+      // Non-fatal — account is still created
+    }
+
+    console.log(`provisionParentAccount: ${isNewAccount ? 'created' : 'linked'} account for client ${clientId}`);
+    return null;
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRIGGER: calculateBookingMileage
+// Fires when a new booking document is created.
+// If mileage is 0 and both addresses are present, calls Google Maps
+// Distance Matrix API to compute the driving distance and updates the
+// booking with the correct mileage and recalculated pricing.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.calculateBookingMileage = functions.firestore
+  .document('bookings/{bookingId}')
+  .onCreate(async (snap, context) => {
+    const booking   = snap.data();
+    const bookingId = context.params.bookingId;
+
+    // Only run if mileage is missing/zero and addresses are present
+    if (booking.mileage && booking.mileage > 0) return null;
+    if (!booking.pickupAddress || !booking.dropoffAddress) {
+      console.log(`calculateBookingMileage: booking ${bookingId} missing addresses, skipping.`);
+      return null;
+    }
+
+    const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+    if (!apiKey) {
+      console.error('calculateBookingMileage: GOOGLE_MAPS_API_KEY not configured.');
+      return null;
+    }
+
+    try {
+      const origin = encodeURIComponent(booking.pickupAddress);
+      const dest   = encodeURIComponent(booking.dropoffAddress);
+      const url    = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${origin}&destinations=${dest}&units=imperial&key=${apiKey}`;
+
+      const fetch  = globalThis.fetch;
+      const res    = await fetch(url);
+      const data   = await res.json();
+
+      if (data.status !== 'OK' || !data.rows?.[0]?.elements?.[0]) {
+        console.error(`calculateBookingMileage: API returned status ${data.status}`);
+        return null;
+      }
+
+      const element = data.rows[0].elements[0];
+      if (element.status !== 'OK') {
+        console.error(`calculateBookingMileage: element status ${element.status}`);
+        return null;
+      }
+
+      // Distance is in meters — convert to miles
+      const meters = element.distance.value;
+      const miles  = Math.round((meters / 1609.34) * 10) / 10;
+
+      if (miles <= 0) return null;
+
+      // Recalculate pricing with the server-side pricing logic
+      const daysCount      = (booking.daysOfWeek || []).length || 5;
+      const isRoundTrip    = booking.transportationType === 'roundtrip';
+      const studentCount   = (booking.studentIds || []).length || 1;
+      const pricing        = computeWeeklyCharge(miles, daysCount, isRoundTrip, studentCount);
+
+      await snap.ref.update({
+        mileage:    miles,
+        weeklyRate: pricing.weekly,
+        dailyRate:  pricing.daily,
+      });
+
+      console.log(`calculateBookingMileage: booking ${bookingId} updated — ${miles} mi, $${pricing.weekly}/wk`);
+    } catch (err) {
+      console.error(`calculateBookingMileage: error for booking ${bookingId}:`, err);
+    }
+
+    return null;
+  });
