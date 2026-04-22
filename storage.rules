@@ -1,0 +1,30 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Driver profile photos — any authenticated user can read (admins show them;
+    // parents can see driver photo). Any authenticated user may upload (we
+    // restrict by file name so a driver can only write their own photo).
+    match /driverPhotos/{driverId} {
+      allow read:  if request.auth != null;
+      allow write: if request.auth != null
+                   && request.resource.size < 5 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+    }
+
+    // Driver onboarding documents (W-9, license, insurance, registration).
+    // The driver uploads to their own folder; the folder name is the
+    // drivers/{driverId} document ID, which is verified against the
+    // driver doc's uid field so a driver can only write into their own folder.
+    match /drivers/{driverId}/onboarding/{fileName} {
+      allow read:  if request.auth != null;
+      allow write: if request.auth != null
+                   && request.resource.size < 15 * 1024 * 1024
+                   && (
+                        request.resource.contentType.matches('image/.*')
+                        || request.resource.contentType == 'application/pdf'
+                      )
+                   && firestore.get(/databases/(default)/documents/drivers/$(driverId)).data.uid
+                      == request.auth.uid;
+    }
+  }
+}

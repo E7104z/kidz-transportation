@@ -12,6 +12,9 @@ import Dispatch from './pages/admin/Dispatch';
 import AdminBilling from './pages/admin/AdminBilling';
 import DriverDashboard from './pages/driver/DriverDashboard';
 import DriverSetup from './pages/driver/DriverSetup';
+import DriverOnboarding from './pages/driver/DriverOnboarding';
+import DriverProfile from './pages/driver/DriverProfile';
+import DriverHistory from './pages/driver/DriverHistory';
 import ParentSetup from './pages/parent/ParentSetup';
 import ParentDashboard from './pages/parent/ParentDashboard';
 import MyChildren from './pages/parent/MyChildren';
@@ -24,6 +27,7 @@ import DriverGuard from './guards/DriverGuard';
 import ParentGuard from './guards/ParentGuard';
 import AdminLayout from './components/AdminLayout';
 import ParentLayout from './components/ParentLayout';
+import DriverLayout from './components/DriverLayout';
 import { ParentDataProvider } from './context/ParentDataContext';
 
 
@@ -34,6 +38,14 @@ function App() {
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/driver/setup" element={<DriverSetup />} />
+          <Route
+            path="/driver/onboarding"
+            element={
+              <DriverGuard>
+                <DriverOnboarding />
+              </DriverGuard>
+            }
+          />
           <Route path="/parent/setup" element={<ParentSetup />} />
           <Route
             path="/admin/*"
@@ -56,13 +68,19 @@ function App() {
             }
           />
           <Route
-            path="/driver/*"
+            path="/driver"
             element={
               <DriverGuard>
-                <DriverDashboard />
+                <DriverLayout />
               </DriverGuard>
             }
-          />
+          >
+            <Route index             element={<Navigate to="today" replace />} />
+            <Route path="today"   element={<DriverDashboard />} />
+            <Route path="history" element={<DriverHistory />} />
+            <Route path="profile" element={<DriverProfile />} />
+            <Route path="*"       element={<Navigate to="today" replace />} />
+          </Route>
           <Route
             path="/parent/*"
             element={

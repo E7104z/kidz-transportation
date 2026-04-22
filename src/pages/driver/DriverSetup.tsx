@@ -44,7 +44,7 @@ const DriverSetup: React.FC = () => {
       }
       await createUserRecord(result.user.uid, googleEmail.toLowerCase(), driverDoc.data().name || result.user.displayName || '', 'driver', driverDoc.id);
       setDone(true);
-      setTimeout(() => { window.location.replace('/driver/dashboard'); }, 1500);
+      setTimeout(() => { window.location.replace('/driver/today'); }, 1500);
     } catch (err: unknown) {
       const code = (err as { code?: string }).code;
       if (code !== 'auth/popup-closed-by-user' && code !== 'auth/cancelled-popup-request') {
@@ -88,7 +88,7 @@ const DriverSetup: React.FC = () => {
       await createUserRecord(cred.user.uid, trimmed, driverName, 'driver', driverId);
 
       setDone(true);
-      setTimeout(() => { window.location.replace('/driver/dashboard'); }, 1500);
+      setTimeout(() => { window.location.replace('/driver/today'); }, 1500);
     } catch (err: unknown) {
       const code = (err as { code?: string }).code;
       if (code === 'auth/email-already-in-use') {

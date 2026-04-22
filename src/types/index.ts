@@ -63,6 +63,7 @@ export interface Driver {
   email: string;
   phone: string;
   uid: string;
+  photoURL?: string;
 }
 
 export type RouteAssignmentStatus = 'pending' | 'paid';
@@ -201,4 +202,40 @@ export interface ClientBilling {
   autoPay?: boolean;
   paymentMethodLast4?: string;
   paymentMethodBrand?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Client Access / Multi-contact system
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type ContactRole = 'primary' | 'secondary' | 'coordinator';
+
+export interface ContactPermissions {
+  canSeeBilling: boolean;
+  canSeeInvoices: boolean;
+  canEdit: boolean;
+}
+
+export const DEFAULT_PERMISSIONS: Record<ContactRole, ContactPermissions> = {
+  primary:     { canSeeBilling: true,  canSeeInvoices: true,  canEdit: true  },
+  secondary:   { canSeeBilling: false, canSeeInvoices: false, canEdit: true  },
+  coordinator: { canSeeBilling: false, canSeeInvoices: false, canEdit: false },
+};
+
+export type InviteStatus = 'pending' | 'accepted' | 'expired';
+
+export interface ClientAccess {
+  id: string;
+  clientId: string;
+  uid: string | null;           // null until the invite is accepted
+  email: string;
+  name: string;
+  role: ContactRole;
+  permissions: ContactPermissions;
+  inviteToken: string | null;   // null after accepted
+  inviteStatus: InviteStatus;
+  inviteExpiresAt: Timestamp | null;
+  invitedAt: Timestamp;
+  acceptedAt: Timestamp | null;
+  createdAt: Timestamp;
 }

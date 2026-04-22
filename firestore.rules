@@ -19,6 +19,18 @@ service cloud.firestore {
       return isAuth() && userRole() == 'driver';
     }
 
+    function hasClientAccess(clientId) {
+      return isAuth() && exists(
+        /databases/$(database)/documents/clientAccess/$(request.auth.uid + '_' + clientId)
+      );
+    }
+
+    function getClientAccess(clientId) {
+      return get(
+        /databases/$(database)/documents/clientAccess/$(request.auth.uid + '_' + clientId)
+      ).data;
+    }
+
     // ── public intake (Apply form) ─────────────────────────────────────────
     // Unauthenticated parents can submit an application; they write to
     // clients / students / bookings directly. Reads and mutations require auth.
@@ -29,7 +41,11 @@ service cloud.firestore {
                     && request.resource.data.name is string
                     && request.resource.data.email is string
                     && request.resource.size() < 20480;
-      allow read, update, delete: if isAuth();
+      allow read:   if isAuth();
+      allow update: if isAdmin()
+                    || (isAuth() && resource.data.uid == request.auth.uid)
+                    || (hasClientAccess(id) && getClientAccess(id).permissions.canEdit == true);
+      allow delete: if isAdmin();
     }
 
     match /students/{id} {
@@ -51,7 +67,21 @@ service cloud.firestore {
     // Drivers can read their own assignments and write route logs.
 
     match /drivers/{id} {
-      allow read, write: if isAdmin();
+      allow read:  if isAuth();           // parents + drivers need to see driver names/phones
+      allow create, delete: if isAdmin();
+      // Admins can update anything; a driver may update their own doc (photoURL, phone)
+      allow update: if isAdmin()
+                    || (isDriver() && resource.data.uid == request.auth.uid);
+
+      // Driver onboarding subcollection — admins full access; a driver can
+      // read/write their own onboarding docs (where parent driver doc
+      // has uid == request.auth.uid).
+      match /onboarding/{docId} {
+        allow read, write: if isAdmin()
+                           || (isDriver()
+                               && get(/databases/$(database)/documents/drivers/$(id)).data.uid
+                                  == request.auth.uid);
+      }
     }
 
     match /routeAssignments/{id} {
@@ -95,6 +125,19 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
+    // ── clientAccess ───────────────────────────────────────
+    // Doc id format: {uid}_{clientId}
+    // Admins manage all. A user can read their own doc.
+    // The invite-acceptance write path (uid was null, now set) is handled by
+    // a Cloud Function (Admin SDK) — no direct client write on acceptance.
+
+    match /clientAccess/{docId} {
+      allow read:   if isAdmin() || (isAuth() && resource.data.uid == request.auth.uid);
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
     // ── driver live location ─────────────────────────────────────────────────
     // Drivers write their own location doc (doc id = their driverId / linkedId).
     // All authenticated users (parents, admins) can read for live tracking.
@@ -119,7 +162,10 @@ service cloud.firestore {
     // Admins have full access. Writes are done by Cloud Functions (Admin SDK).
 
     match /invoices/{id} {
-      allow read: if isAuth();
+      allow read:  if isAdmin()
+                   || (isAuth() && resource.data.clientId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.linkedId)
+                   || (isAuth() && hasClientAccess(resource.data.clientId)
+                       && getClientAccess(resource.data.clientId).permissions.canSeeInvoices == true);
       allow write: if isAdmin();
     }
 

@@ -35,3 +35,5 @@ functions/createDriverAccounts.js
 # Firebase service account keys
 *serviceAccount*.json
 *service-account*.json
+
+.vercel

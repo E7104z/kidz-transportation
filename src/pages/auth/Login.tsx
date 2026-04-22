@@ -7,7 +7,7 @@ import { useAuth } from '../../context/AuthContext';
 
 function resolveRedirect(role: string | null): string {
   if (role === 'admin') return '/admin/dashboard';
-  if (role === 'driver') return '/driver/dashboard';
+  if (role === 'driver') return '/driver/today';
   if (role === 'parent') return '/parent/status';
   return '/login';
 }

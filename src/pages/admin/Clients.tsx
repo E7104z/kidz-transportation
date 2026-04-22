@@ -26,6 +26,10 @@ import {
   ExternalLink,
   Trash2,
   AlertTriangle,
+  Mail,
+  UserPlus,
+  Shield,
+  RefreshCw,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { db } from '../../services/firebase';
@@ -33,7 +37,9 @@ import { computeWeeklyCharge } from '../../utils/pricing';
 import { getMileage } from '../../services/mileageService';
 import { generateAndSaveContract, queueContractEmail, fetchContract } from '../../services/contractService';
 import AddressAutocomplete from '../../components/AddressAutocomplete';
-import type { Client, Student, Booking, Contract } from '../../types';
+import type { Client, Student, Booking, Contract, ClientAccess, ContactRole, ContactPermissions } from '../../types';
+import { DEFAULT_PERMISSIONS } from '../../types';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 
 const STATUS_COLORS: Record<string, string> = {
   new: 'bg-blue-100 text-blue-700',
@@ -199,8 +205,8 @@ const AddClientModal: React.FC<AddClientModalProps> = ({ onClose }) => {
           <section>
             <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">Route &amp; Schedule</h3>
             <div className="grid grid-cols-2 gap-3">
-              <div className="col-span-2"><label className={labelCls}>Pickup Address</label><AddressAutocomplete value={pickupAddress} onChange={v => { setPickupAddress(v); if (v && dropoffAddress) tryFetchMileage(v, dropoffAddress); }} placeholder="Start typing..." className={inputCls} /></div>
-              <div className="col-span-2"><label className={labelCls}>Dropoff Address</label><AddressAutocomplete value={dropoffAddress} onChange={v => { setDropoffAddress(v); if (pickupAddress && v) tryFetchMileage(pickupAddress, v); }} placeholder="Start typing..." className={inputCls} /></div>
+              <div className="col-span-2"><label className={labelCls}>Pickup Address</label><AddressAutocomplete value={pickupAddress} onChange={setPickupAddress} onSelect={v => { if (dropoffAddress) tryFetchMileage(v, dropoffAddress); }} placeholder="Start typing..." className={inputCls} /></div>
+              <div className="col-span-2"><label className={labelCls}>Dropoff Address</label><AddressAutocomplete value={dropoffAddress} onChange={setDropoffAddress} onSelect={v => { if (pickupAddress) tryFetchMileage(pickupAddress, v); }} placeholder="Start typing..." className={inputCls} /></div>
               <div><label className={labelCls}>Transportation Type</label><select className={inputCls} value={transportationType} onChange={e => setTransportationType(e.target.value)}>{TRANSPORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select></div>
               <div><label className={labelCls}>Mileage {fetchingMileage && <span className="text-violet-400">(auto-fetching...)</span>}</label><input type="number" step="0.1" className={inputCls} value={mileage} onChange={e => setMileage(Number(e.target.value))} /></div>
               <div><label className={labelCls}>School Start Time</label><input type="time" className={inputCls} value={schoolStartTime} onChange={e => setSchoolStartTime(e.target.value)} /></div>
@@ -238,7 +244,7 @@ const AddClientModal: React.FC<AddClientModalProps> = ({ onClose }) => {
   );
 };
 
-type TabId = 'overview' | 'booking' | 'contract';
+type TabId = 'overview' | 'booking' | 'contract' | 'contacts';
 
 interface ClientDetailPanelProps {
   client: Client; students: Student[]; booking: Booking | null;
@@ -266,6 +272,7 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
   const [savingNewStudent, setSavingNewStudent] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [sendingInvite, setSendingInvite] = useState(false);
 
   useEffect(() => {
     const q = query(collection(db, 'contracts'), where('clientId', '==', client.id), orderBy('generatedAt', 'desc'));
@@ -378,6 +385,23 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
     } finally { setGeneratingContract(false); }
   };
 
+  const handleSendPortalInvite = async () => {
+    if (!client.email) { toast.error('No email on file for this client'); return; }
+    const ok = window.confirm(`Send Parent Portal setup email to ${client.email}?`);
+    if (!ok) return;
+    setSendingInvite(true);
+    try {
+      const fn = httpsCallable<{ clientId: string }, { sent: boolean; action: 'created' | 'linked' | 'resent' }>(
+        getFunctions(), 'sendPortalInvite'
+      );
+      const res = await fn({ clientId: client.id });
+      const label = res.data.action === 'resent' ? 'Reset link resent' : 'Portal invite sent';
+      toast.success(`${label} to ${client.email}`);
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Failed to send invite');
+    } finally { setSendingInvite(false); }
+  };
+
   const formatTs = (ts: any) => {
     if (!ts) return '---';
     const d = ts?.toDate ? ts.toDate() : ts instanceof Date ? ts : null;
@@ -388,6 +412,7 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
     { id: 'overview', label: 'Overview', icon: <Users size={14} /> },
     { id: 'booking', label: 'Booking', icon: <GraduationCap size={14} /> },
     { id: 'contract', label: 'Contract', icon: <FileText size={14} /> },
+    { id: 'contacts', label: 'Contacts', icon: <Shield size={14} /> },
   ];
 
   return (
@@ -400,6 +425,14 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
             <p className="text-violet-200 text-xs mt-0.5">{client.email}</p>
           </div>
           <div className="flex items-center gap-2 ml-3">
+            <button
+              onClick={handleSendPortalInvite}
+              disabled={sendingInvite || !client.email}
+              title="Send/Resend Parent Portal invite email"
+              className="p-1.5 text-white/70 hover:text-white hover:bg-white/10 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {sendingInvite ? <Loader2 size={16} className="animate-spin" /> : <Mail size={16} />}
+            </button>
             <button
               onClick={() => setConfirmDelete(true)}
               title="Delete client"
@@ -567,8 +600,8 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
                     <div className="p-4 grid grid-cols-2 gap-3">
                       {editingBooking ? (
                         <>
-                          <div className="col-span-2"><label className={labelCls}>Pickup Address</label><AddressAutocomplete value={bookingForm.pickupAddress ?? ''} onChange={v => { setBookingForm(f => ({ ...f, pickupAddress: v })); if (v && bookingForm.dropoffAddress) tryFetchMileage(v, bookingForm.dropoffAddress); }} className={inputCls} /></div>
-                          <div className="col-span-2"><label className={labelCls}>Dropoff Address</label><AddressAutocomplete value={bookingForm.dropoffAddress ?? ''} onChange={v => { setBookingForm(f => ({ ...f, dropoffAddress: v })); if (bookingForm.pickupAddress && v) tryFetchMileage(bookingForm.pickupAddress, v); }} className={inputCls} /></div>
+                          <div className="col-span-2"><label className={labelCls}>Pickup Address</label><AddressAutocomplete value={bookingForm.pickupAddress ?? ''} onChange={v => setBookingForm(f => ({ ...f, pickupAddress: v }))} onSelect={v => { if (bookingForm.dropoffAddress) tryFetchMileage(v, bookingForm.dropoffAddress); }} className={inputCls} /></div>
+                          <div className="col-span-2"><label className={labelCls}>Dropoff Address</label><AddressAutocomplete value={bookingForm.dropoffAddress ?? ''} onChange={v => setBookingForm(f => ({ ...f, dropoffAddress: v }))} onSelect={v => { if (bookingForm.pickupAddress) tryFetchMileage(bookingForm.pickupAddress, v); }} className={inputCls} /></div>
                           <div><label className={labelCls}>Transport Type</label><select className={inputCls} value={bookingForm.transportationType} onChange={e => setBookingForm(f => ({ ...f, transportationType: e.target.value as any }))}>{TRANSPORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select></div>
                           <div><label className={labelCls}>Mileage {fetchingMileage && <span className="text-violet-400">(fetching...)</span>}</label><input type="number" step="0.1" className={inputCls} value={bookingForm.mileage ?? 0} onChange={e => setBookingForm(f => ({ ...f, mileage: Number(e.target.value) }))} /></div>
                           <div><label className={labelCls}>School Start</label><input type="time" className={inputCls} value={bookingForm.schoolStartTime ?? ''} onChange={e => setBookingForm(f => ({ ...f, schoolStartTime: e.target.value }))} /></div>
@@ -636,9 +669,240 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
               )}
             </div>
           )}
+
+          {activeTab === 'contacts' && (
+            <ContactsPanel clientId={client.id} />
+          )}
         </div>
       </div>
     </>
+  );
+};
+
+// ────────────────────────────────────────────────────────────────────────────
+// ContactsPanel — manage multi-parent / coordinator access for a client
+// ────────────────────────────────────────────────────────────────────────────
+interface ContactsPanelProps { clientId: string; }
+
+const ContactsPanel: React.FC<ContactsPanelProps> = ({ clientId }) => {
+  const [contacts, setContacts] = useState<ClientAccess[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showInvite, setShowInvite] = useState(false);
+  const [inviteName, setInviteName] = useState('');
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<ContactRole>('secondary');
+  const [invitePerms, setInvitePerms] = useState<ContactPermissions>(DEFAULT_PERMISSIONS.secondary);
+  const [sending, setSending] = useState(false);
+  const [removingId, setRemovingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const q = query(collection(db, 'clientAccess'), where('clientId', '==', clientId));
+    const unsub = onSnapshot(q, snap => {
+      const list = snap.docs.map(d => ({ id: d.id, ...d.data() }) as ClientAccess);
+      list.sort((a, b) => {
+        const order = { primary: 0, secondary: 1, coordinator: 2 } as const;
+        return order[a.role] - order[b.role];
+      });
+      setContacts(list);
+      setLoading(false);
+    });
+    return unsub;
+  }, [clientId]);
+
+  const handleRoleChange = (role: ContactRole) => {
+    setInviteRole(role);
+    setInvitePerms(DEFAULT_PERMISSIONS[role]);
+  };
+
+  const sendInvite = async () => {
+    if (!inviteName.trim() || !inviteEmail.trim()) {
+      toast.error('Name and email required');
+      return;
+    }
+    setSending(true);
+    try {
+      const fn = httpsCallable(getFunctions(), 'sendContactInvite');
+      await fn({
+        clientId,
+        name: inviteName.trim(),
+        email: inviteEmail.trim().toLowerCase(),
+        role: inviteRole,
+        permissions: invitePerms,
+      });
+      toast.success('Invitation sent');
+      setShowInvite(false);
+      setInviteName('');
+      setInviteEmail('');
+      setInviteRole('secondary');
+      setInvitePerms(DEFAULT_PERMISSIONS.secondary);
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to send invite');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const resendInvite = async (c: ClientAccess) => {
+    setSending(true);
+    try {
+      const fn = httpsCallable(getFunctions(), 'sendContactInvite');
+      await fn({
+        clientId,
+        name: c.name,
+        email: c.email,
+        role: c.role,
+        permissions: c.permissions,
+      });
+      const rm = httpsCallable(getFunctions(), 'removeContactAccess');
+      await rm({ docId: c.id });
+      toast.success('Invitation resent');
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to resend');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const removeContact = async (c: ClientAccess) => {
+    if (!confirm(`Remove ${c.name} (${c.email})? They will lose portal access.`)) return;
+    setRemovingId(c.id);
+    try {
+      const fn = httpsCallable(getFunctions(), 'removeContactAccess');
+      await fn({ docId: c.id });
+      toast.success('Contact removed');
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to remove contact');
+    } finally {
+      setRemovingId(null);
+    }
+  };
+
+  const roleBadge = (role: ContactRole) => {
+    const styles: Record<ContactRole, string> = {
+      primary:     'bg-violet-100 text-violet-700',
+      secondary:   'bg-blue-100 text-blue-700',
+      coordinator: 'bg-amber-100 text-amber-700',
+    };
+    const labels: Record<ContactRole, string> = {
+      primary: 'Primary', secondary: 'Secondary', coordinator: 'Coordinator',
+    };
+    return <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${styles[role]}`}>{labels[role]}</span>;
+  };
+
+  const statusBadge = (status: string) => {
+    const styles: Record<string, string> = {
+      pending:  'bg-amber-100 text-amber-700',
+      accepted: 'bg-green-100 text-green-700',
+      expired:  'bg-gray-100 text-gray-500',
+    };
+    return <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${styles[status] || 'bg-gray-100'}`}>{status}</span>;
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="text-xs font-bold text-slate-500 uppercase tracking-widest">Portal Contacts</div>
+        <button onClick={() => setShowInvite(true)} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-violet-600 hover:bg-violet-700 text-white transition-colors">
+          <UserPlus size={12} /> Invite Contact
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="flex items-center justify-center py-8 text-slate-400"><Loader2 size={18} className="animate-spin" /></div>
+      ) : contacts.length === 0 ? (
+        <div className="text-center py-8 bg-slate-50 rounded-xl">
+          <Shield size={28} className="mx-auto text-slate-300 mb-2" />
+          <div className="text-sm text-slate-500">No additional contacts yet.</div>
+          <div className="text-xs text-slate-400 mt-1">The primary parent is managed on the Overview tab.</div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {contacts.map(c => (
+            <div key={c.id} className="flex items-center justify-between bg-white border border-slate-200 rounded-xl px-4 py-3">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-0.5">
+                  <div className="text-sm font-semibold text-slate-800 truncate">{c.name}</div>
+                  {roleBadge(c.role)}
+                  {statusBadge(c.inviteStatus)}
+                </div>
+                <div className="text-xs text-slate-500 truncate">{c.email}</div>
+                <div className="text-[10px] text-slate-400 mt-1 flex gap-2 flex-wrap">
+                  {c.permissions.canEdit && <span>Can Edit</span>}
+                  {c.permissions.canSeeBilling && <span>Billing</span>}
+                  {c.permissions.canSeeInvoices && <span>Invoices</span>}
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {c.inviteStatus === 'pending' && (
+                  <button disabled={sending} onClick={() => resendInvite(c)} className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 disabled:opacity-40" title="Resend invite">
+                    <RefreshCw size={14} />
+                  </button>
+                )}
+                {c.role !== 'primary' && (
+                  <button disabled={removingId === c.id} onClick={() => removeContact(c)} className="p-2 rounded-lg text-rose-500 hover:bg-rose-50 disabled:opacity-40" title="Remove contact">
+                    {removingId === c.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {showInvite && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !sending && setShowInvite(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-slate-800">Invite Contact</h3>
+              <button onClick={() => !sending && setShowInvite(false)} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className={labelCls}>Full Name</label>
+                <input className={inputCls} value={inviteName} onChange={e => setInviteName(e.target.value)} placeholder="Jane Smith" />
+              </div>
+              <div>
+                <label className={labelCls}>Email</label>
+                <input type="email" className={inputCls} value={inviteEmail} onChange={e => setInviteEmail(e.target.value)} placeholder="jane@example.com" />
+              </div>
+              <div>
+                <label className={labelCls}>Role</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button type="button" onClick={() => handleRoleChange('secondary')} className={`px-3 py-2 rounded-lg text-xs font-semibold border transition-colors ${inviteRole === 'secondary' ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-slate-700 border-slate-200 hover:border-violet-300'}`}>Secondary Parent</button>
+                  <button type="button" onClick={() => handleRoleChange('coordinator')} className={`px-3 py-2 rounded-lg text-xs font-semibold border transition-colors ${inviteRole === 'coordinator' ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-slate-700 border-slate-200 hover:border-violet-300'}`}>Coordinator</button>
+                </div>
+                <div className="text-[11px] text-slate-400 mt-1.5">
+                  {inviteRole === 'secondary' ? 'Can view and edit child details. No billing access.' : 'View-only access (e.g., school staff or caregiver).'}
+                </div>
+              </div>
+              <div>
+                <label className={labelCls}>Permissions</label>
+                <div className="space-y-1.5 bg-slate-50 rounded-xl p-3">
+                  <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                    <input type="checkbox" checked={invitePerms.canEdit} onChange={e => setInvitePerms(p => ({ ...p, canEdit: e.target.checked }))} className="rounded" />
+                    Can edit child details
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                    <input type="checkbox" checked={invitePerms.canSeeBilling} onChange={e => setInvitePerms(p => ({ ...p, canSeeBilling: e.target.checked }))} className="rounded" />
+                    Can see billing
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                    <input type="checkbox" checked={invitePerms.canSeeInvoices} onChange={e => setInvitePerms(p => ({ ...p, canSeeInvoices: e.target.checked }))} className="rounded" />
+                    Can see invoices
+                  </label>
+                </div>
+              </div>
+            </div>
+            <div className="flex gap-2 mt-5">
+              <button onClick={() => setShowInvite(false)} disabled={sending} className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200 transition-colors disabled:opacity-50">Cancel</button>
+              <button onClick={sendInvite} disabled={sending} className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-violet-600 hover:bg-violet-700 text-white transition-colors disabled:opacity-50 inline-flex items-center justify-center gap-1.5">
+                {sending ? <><Loader2 size={14} className="animate-spin" /> Sending...</> : <><Mail size={14} /> Send Invite</>}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 };
 
@@ -661,8 +925,15 @@ const Clients: React.FC = () => {
   }, []);
 
   const totalFamilies = clients.length;
-  const activeCount = bookings.filter(b => b.status === 'active').length;
-  const pendingCount = bookings.filter(b => b.status === 'new' || b.status === 'under_review').length;
+  // Use the same "first booking" logic as the table Status column so numbers always match
+  const activeCount = clients.filter(c => {
+    const bk = bookings.find(b => b.clientId === c.id);
+    return bk?.status === 'active';
+  }).length;
+  const pendingCount = clients.filter(c => {
+    const bk = bookings.find(b => b.clientId === c.id);
+    return bk?.status === 'new' || bk?.status === 'under_review';
+  }).length;
 
   const q = search.toLowerCase();
   const filtered = clients.filter(c => {

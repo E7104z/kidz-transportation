@@ -8,12 +8,10 @@ import type {
   RouteAssignment, Booking, Client, Student, RouteLog, StudentEvent, StudentEventType,
 } from '../../types';
 import {
-  Bus, MapPin, Clock, Calendar, LogOut, CheckCircle, XCircle,
+  MapPin, Clock, Calendar, CheckCircle, XCircle,
   UserCheck, UserX, Navigation, PhoneCall, AlertCircle, ChevronDown,
-  ChevronUp, Wifi, WifiOff,
+  ChevronUp, Wifi, WifiOff, FileText, Bell,
 } from 'lucide-react';
-import { signOut } from '../../services/authService';
-import { useNavigate } from 'react-router-dom';
 import { format } from 'date-fns';
 import toast from 'react-hot-toast';
 
@@ -147,7 +145,6 @@ async function queueSms(to: string, body: string, meta?: { bookingId?: string; s
 
 const DriverDashboard: React.FC = () => {
   const { user } = useAuth();
-  const navigate  = useNavigate();
 
   const [assignments, setAssignments] = useState<RouteAssignment[]>([]);
   const [bookings,    setBookings]    = useState<Record<string, Booking>>({});
@@ -155,12 +152,13 @@ const DriverDashboard: React.FC = () => {
   const [students,    setStudents]    = useState<Record<string, Student>>({});
   const [todayLogs,   setTodayLogs]   = useState<RouteLog[]>([]);
   const [loading,     setLoading]     = useState(true);
-  const [driverName,  setDriverName]  = useState('');
   const [linkedId,    setLinkedId]    = useState('');
   const [expandedRoute,   setExpandedRoute]   = useState<string | null>(null);
   const [savingEvent,     setSavingEvent]     = useState<string | null>(null);
   const [gpsActive,       setGpsActive]       = useState(true);
   const [isOnline,         setIsOnline]         = useState(navigator.onLine);
+  const [noteDrafts,      setNoteDrafts]      = useState<Record<string, string>>({});
+  const [savingNote,      setSavingNote]      = useState<string | null>(null);
 
   const todayStr     = useMemo(() => format(new Date(), 'yyyy-MM-dd'), []);
   const todayDayName = useMemo(() => format(new Date(), 'EEEE'), []);
@@ -189,7 +187,6 @@ const DriverDashboard: React.FC = () => {
     getDoc(doc(db, 'users', user.uid)).then(userSnap => {
       if (cancelled) return;
       const id = userSnap.data()?.linkedId as string | undefined;
-      setDriverName(userSnap.data()?.name || user.email || 'Driver');
       if (!id) { setLoading(false); return; }
       setLinkedId(id);
 
@@ -385,75 +382,107 @@ const DriverDashboard: React.FC = () => {
     toast(gpsActive ? 'GPS stopped — location hidden from dispatch' : 'GPS started — sharing location', { icon: gpsActive ? '📍' : '🛰️' });
   };
 
-  const handleLogout = async () => {
-    if (routeInProgress) {
-      toast.error('Cannot log out while a route is in progress');
-      return;
+  const saveRouteNotes = async (bookingId: string) => {
+    if (!user || !linkedId) return;
+    const notes = noteDrafts[bookingId] ?? '';
+    setSavingNote(bookingId);
+    try {
+      await setDoc(doc(db, 'routeLogs', `${bookingId}_${todayStr}`), {
+        bookingId, driverId: linkedId, date: todayStr,
+        confirmedBy: user.uid, confirmedAt: serverTimestamp(), notes,
+      }, { merge: true });
+      toast.success('Note saved');
+    } catch {
+      toast.error('Failed to save note');
+    } finally {
+      setSavingNote(null);
     }
-    if (linkedId) {
-      try { await deleteDoc(doc(db, 'driverLocations', linkedId)); } catch {}
-    }
-    await signOut();
-    navigate('/login', { replace: true });
   };
 
   // ── render ────────────────────────────────────────────────────────────────
 
+  // Compute today totals for hero stats
+  const totals = (() => {
+    let routesDone = 0;
+    let studentsOnBoard = 0;
+    let studentsRemaining = 0;
+    let studentsTotal = 0;
+    todayAssignments.forEach(a => {
+      const log = todayLogMap[a.bookingId];
+      const booking = bookings[a.bookingId];
+      const sids = booking?.studentIds ?? [];
+      const evts = (log?.studentEvents ?? {}) as Record<string, { status: string }>;
+      const absent  = sids.filter(sid => evts[sid]?.status === 'absent').length;
+      const pickedUp = sids.filter(sid => evts[sid]?.status === 'picked_up').length;
+      const dropped  = sids.filter(sid => evts[sid]?.status === 'dropped_off').length;
+      studentsTotal   += sids.length;
+      studentsOnBoard += pickedUp;
+      studentsRemaining += Math.max(0, sids.length - absent - dropped);
+      if (log?.ran === false) routesDone++;
+      else if (sids.length === 0 && log?.ran === true) routesDone++;
+      else if (sids.length > 0 && dropped >= (sids.length - absent)) routesDone++;
+    });
+    return { routesDone, routesTotal: todayAssignments.length, studentsOnBoard, studentsRemaining, studentsTotal };
+  })();
+
   return (
-    <div className="min-h-screen bg-slate-100 pb-10">
+    <div>
       {!isOnline && (
         <div className="bg-amber-500 text-white text-xs font-semibold text-center py-2 px-4">
           You are offline — actions will sync when connection is restored
         </div>
       )}
-      {/* Header */}
-      <div className="bg-gradient-to-r from-teal-600 to-emerald-600 px-5 py-4 flex items-center justify-between sticky top-0 z-10 shadow-md">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 bg-amber-400 rounded-xl flex items-center justify-center flex-shrink-0">
-            <Bus size={18} className="text-teal-900" />
+      {/* Stats hero */}
+      <div className="px-5 pt-5 pb-3">
+        <div className="bg-gradient-to-br from-teal-600 to-emerald-600 rounded-2xl shadow-lg p-5 text-white">
+          <div className="flex items-start justify-between mb-4">
+            <div>
+              <div className="text-teal-50 text-xs font-semibold uppercase tracking-widest flex items-center gap-1.5">
+                <Calendar size={12} /> Today
+              </div>
+              <div className="text-white font-bold text-lg leading-tight mt-0.5">
+                {format(new Date(), 'EEEE, MMM d')}
+              </div>
+            </div>
+            <button
+              onClick={toggleGps}
+              title={gpsActive ? (gpsEnabled ? 'GPS active — tap to stop' : 'Acquiring GPS…') : 'GPS stopped — tap to start'}
+              className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-full font-medium border transition-colors ${
+                gpsActive && gpsEnabled
+                  ? 'bg-emerald-400/25 text-white border-emerald-300/40 hover:bg-emerald-400/40'
+                  : gpsActive
+                  ? 'bg-amber-400/25 text-white border-amber-300/40 hover:bg-amber-400/40'
+                  : 'bg-white/10 text-white/70 border-white/10 hover:bg-white/20 hover:text-white'
+              }`}>
+              {gpsActive ? <Wifi size={13} /> : <WifiOff size={13} />}
+              <span>{gpsActive ? (gpsEnabled ? 'GPS On' : 'GPS…') : 'GPS Off'}</span>
+            </button>
           </div>
-          <div>
-            <div className="text-white font-bold leading-tight">KIDZ Transportation</div>
-            <div className="text-teal-100 text-xs">Driver — {driverName}</div>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-white/15 rounded-xl p-3 text-center backdrop-blur">
+              <div className="text-2xl font-extrabold leading-none">{totals.routesDone}<span className="text-sm font-semibold text-white/60">/{totals.routesTotal}</span></div>
+              <div className="text-[10px] font-semibold text-white/75 uppercase tracking-widest mt-1">Routes</div>
+            </div>
+            <div className="bg-white/15 rounded-xl p-3 text-center backdrop-blur">
+              <div className="text-2xl font-extrabold leading-none">{totals.studentsOnBoard}</div>
+              <div className="text-[10px] font-semibold text-white/75 uppercase tracking-widest mt-1">On Board</div>
+            </div>
+            <div className="bg-white/15 rounded-xl p-3 text-center backdrop-blur">
+              <div className="text-2xl font-extrabold leading-none">{totals.studentsRemaining}</div>
+              <div className="text-[10px] font-semibold text-white/75 uppercase tracking-widest mt-1">Remaining</div>
+            </div>
           </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={toggleGps}
-            title={gpsActive ? (gpsEnabled ? 'GPS active — tap to stop' : 'Acquiring GPS…') : 'GPS stopped — tap to start'}
-            className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-full font-medium border transition-colors ${
-              gpsActive && gpsEnabled
-                ? 'bg-emerald-400/25 text-white border-emerald-300/40 hover:bg-emerald-400/40'
-                : gpsActive
-                ? 'bg-amber-400/25 text-white border-amber-300/40 hover:bg-amber-400/40'
-                : 'bg-white/10 text-white/50 border-white/10 hover:bg-white/20 hover:text-white'
-            }`}
-          >
-            {gpsActive ? <Wifi size={13} /> : <WifiOff size={13} />}
-            <span>{gpsActive ? (gpsEnabled ? 'GPS On' : 'GPS…') : 'GPS Off'}</span>
-          </button>
-          <button onClick={handleLogout}
-            className="flex items-center gap-1.5 bg-white/20 hover:bg-white/30 text-white text-xs font-medium px-3 py-1.5 rounded-lg transition-colors">
-            <LogOut size={13} /> Logout
-          </button>
         </div>
       </div>
 
       {gpsActive && gpsError && (
-        <div className="mx-5 mt-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 flex items-center gap-2 text-xs text-amber-800">
+        <div className="mx-5 mt-2 bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 flex items-center gap-2 text-xs text-amber-800">
           <AlertCircle size={14} className="flex-shrink-0" />
           {gpsError} — tap Allow Location if prompted
         </div>
       )}
 
-      <div className="p-5">
-        <div className="flex items-center gap-2 mb-4">
-          <Calendar size={14} className="text-teal-600" />
-          <span className="text-xs font-semibold text-slate-500 uppercase tracking-widest">
-            {format(new Date(), 'EEEE, MMMM d, yyyy')}
-          </span>
-        </div>
-
+      <div className="px-5 pt-2 pb-5">
         {loading ? (
           <div className="space-y-3">
             {[1, 2, 3].map(i => <div key={i} className="bg-white rounded-2xl border border-slate-200 p-5 animate-pulse h-32" />)}
@@ -513,20 +542,23 @@ const DriverDashboard: React.FC = () => {
                   {/* Expanded detail */}
                   {isExpanded && (
                     <div className="border-t border-slate-100 px-4 pb-4 pt-3 space-y-4">
-                      {/* Address + nav */}
-                      <div className="bg-slate-50 rounded-xl p-3 space-y-2">
-                        <div className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-1">Route</div>
+                      {/* Navigation buttons */}
+                      <div className="grid grid-cols-2 gap-2">
                         <a href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(booking?.pickupAddress ?? '')}`}
                           target="_blank" rel="noopener noreferrer"
-                          className="flex items-center gap-2 text-sm text-blue-600 hover:underline font-medium">
-                          <Navigation size={14} /> Navigate to pickup
+                          className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold py-3 rounded-xl shadow-sm transition-colors">
+                          <Navigation size={16} /> Pickup
                         </a>
-                        <div className="text-xs text-slate-500"><span className="font-medium">Drop-off:</span> {booking?.dropoffAddress ?? '\u2014'}</div>
-                        {client?.phone && (
-                          <a href={`tel:${client.phone}`} className="flex items-center gap-2 text-sm text-teal-600 hover:underline font-medium">
-                            <PhoneCall size={14} /> {client.phone}
-                          </a>
-                        )}
+                        <a href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(booking?.dropoffAddress ?? '')}`}
+                          target="_blank" rel="noopener noreferrer"
+                          className="flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-bold py-3 rounded-xl shadow-sm transition-colors">
+                          <Navigation size={16} /> Drop-off
+                        </a>
+                      </div>
+
+                      <div className="bg-slate-50 rounded-xl p-3 space-y-1 text-xs text-slate-600">
+                        <div><span className="font-semibold text-slate-400 uppercase tracking-widest text-[10px]">Pickup:</span> {booking?.pickupAddress ?? '—'}</div>
+                        <div><span className="font-semibold text-slate-400 uppercase tracking-widest text-[10px]">Drop-off:</span> {booking?.dropoffAddress ?? '—'}</div>
                       </div>
 
                       {/* Per-student tap cards */}
@@ -538,52 +570,61 @@ const DriverDashboard: React.FC = () => {
                               const ev     = events[s.id] as StudentEvent | undefined;
                               const saving = savingEvent === `${a.bookingId}_${s.id}`;
                               return (
-                                <div key={s.id} className={`rounded-xl border p-3 ${
-                                  ev?.status === 'dropped_off' ? 'bg-emerald-50 border-emerald-200' :
-                                  ev?.status === 'picked_up'   ? 'bg-amber-50 border-amber-200' :
+                                <div key={s.id} className={`rounded-xl border-2 p-4 ${
+                                  ev?.status === 'dropped_off' ? 'bg-emerald-50 border-emerald-300' :
+                                  ev?.status === 'picked_up'   ? 'bg-amber-50 border-amber-300' :
                                   ev?.status === 'absent'      ? 'bg-slate-50 border-slate-200' : 'bg-white border-slate-200'
                                 }`}>
-                                  <div className="flex items-center justify-between mb-2">
-                                    <div>
-                                      <div className="font-semibold text-slate-800 text-sm">{s.name}</div>
+                                  <div className="flex items-start justify-between gap-2 mb-3">
+                                    <div className="min-w-0">
+                                      <div className="font-bold text-slate-800 text-base leading-tight">{s.name}</div>
+                                      {s.grade && <div className="text-xs text-slate-500 mt-0.5">Grade {s.grade}</div>}
                                       {s.allergies && (
-                                        <div className="text-xs text-rose-600 font-medium">\u26a0 {s.allergies}</div>
+                                        <div className="text-xs text-rose-600 font-semibold mt-1">⚠ {s.allergies}</div>
                                       )}
                                     </div>
-                                    {ev && (
-                                      <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
-                                        ev.status === 'dropped_off' ? 'bg-emerald-200 text-emerald-800' :
-                                        ev.status === 'picked_up'   ? 'bg-amber-200 text-amber-800' : 'bg-slate-200 text-slate-600'
-                                      }`}>{ev.status.replace('_', ' ')}</span>
-                                    )}
+                                    <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                                      {ev && (
+                                        <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
+                                          ev.status === 'dropped_off' ? 'bg-emerald-200 text-emerald-800' :
+                                          ev.status === 'picked_up'   ? 'bg-amber-200 text-amber-800' : 'bg-slate-200 text-slate-600'
+                                        }`}>{ev.status.replace('_', ' ')}</span>
+                                      )}
+                                      {client?.phone && (
+                                        <a href={`tel:${fmtPhone(client.phone)}`}
+                                          className="flex items-center gap-1 bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold px-2.5 py-1.5 rounded-lg">
+                                          <PhoneCall size={12} /> Call
+                                        </a>
+                                      )}
+                                    </div>
                                   </div>
                                   <div className="flex gap-2 flex-wrap">
                                     {(!ev || ev.status === 'absent') && (
                                       <button disabled={saving}
                                         onClick={() => logStudentEvent(a.bookingId, s.id, 'picked_up')}
-                                        className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold px-3 py-2 rounded-lg transition-colors disabled:opacity-60 flex-1 justify-center">
-                                        {saving ? <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <UserCheck size={13} />}
+                                        className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white text-sm font-bold px-3 py-3 rounded-xl transition-colors disabled:opacity-60 flex-1 justify-center min-h-[46px]">
+                                        {saving ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <UserCheck size={16} />}
                                         Picked Up
                                       </button>
                                     )}
                                     {ev?.status === 'picked_up' && (
                                       <button disabled={saving}
                                         onClick={() => logStudentEvent(a.bookingId, s.id, 'dropped_off')}
-                                        className="flex items-center gap-1.5 bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold px-3 py-2 rounded-lg transition-colors disabled:opacity-60 flex-1 justify-center">
-                                        {saving ? <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <CheckCircle size={13} />}
+                                        className="flex items-center gap-1.5 bg-emerald-500 hover:bg-emerald-600 active:bg-emerald-700 text-white text-sm font-bold px-3 py-3 rounded-xl transition-colors disabled:opacity-60 flex-1 justify-center min-h-[46px]">
+                                        {saving ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <CheckCircle size={16} />}
                                         Dropped Off
                                       </button>
                                     )}
                                     {!ev && (
                                       <button disabled={saving}
                                         onClick={() => logStudentEvent(a.bookingId, s.id, 'absent')}
-                                        className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-bold px-3 py-2 rounded-lg transition-colors disabled:opacity-60 flex-1 justify-center">
-                                        <UserX size={13} /> Absent
+                                        className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 text-sm font-bold px-3 py-3 rounded-xl transition-colors disabled:opacity-60 flex-1 justify-center min-h-[46px]">
+                                        <UserX size={15} /> Absent
                                       </button>
                                     )}
                                     {ev?.status === 'dropped_off' && (
-                                      <span className="flex items-center gap-1.5 bg-emerald-100 text-emerald-700 text-xs font-bold px-3 py-2 rounded-lg flex-1 justify-center">
-                                        <CheckCircle size={13} /> Complete
+                                      <span className="flex items-center gap-1.5 bg-emerald-100 text-emerald-700 text-sm font-bold px-3 py-3 rounded-xl flex-1 justify-center min-h-[46px]">
+                                        <CheckCircle size={16} /> Complete
                                       </span>
                                     )}
                                   </div>
@@ -594,11 +635,34 @@ const DriverDashboard: React.FC = () => {
                         </div>
                       )}
 
+                      {/* Route notes */}
+                      <div>
+                        <label className="flex items-center gap-2 text-xs font-semibold text-slate-400 uppercase tracking-widest mb-2">
+                          <FileText size={12} /> Notes for this route
+                        </label>
+                        <textarea
+                          value={noteDrafts[a.bookingId] ?? log?.notes ?? ''}
+                          onChange={e => setNoteDrafts(d => ({ ...d, [a.bookingId]: e.target.value }))}
+                          placeholder="e.g. Gate code changed, road closed, parent request…"
+                          rows={2}
+                          className="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent resize-none"
+                        />
+                        <div className="flex justify-end mt-1">
+                          <button
+                            type="button"
+                            disabled={savingNote === a.bookingId}
+                            onClick={() => saveRouteNotes(a.bookingId)}
+                            className="text-xs font-semibold text-teal-600 hover:text-teal-700 disabled:opacity-60">
+                            {savingNote === a.bookingId ? 'Saving…' : 'Save note'}
+                          </button>
+                        </div>
+                      </div>
+
                       {/* Action row */}
                       <div className="flex gap-2 flex-wrap pt-1">
                         <button onClick={() => notifyNearby(a.bookingId)}
                           className="flex items-center gap-1.5 bg-blue-100 hover:bg-blue-200 text-blue-700 text-xs font-semibold px-3 py-2 rounded-lg transition-colors">
-                          <PhoneCall size={13} /> Notify "On the Way"
+                          <Bell size={13} /> Notify "On the Way"
                         </button>
                         {studentList.length === 0 && !log?.ran && !routeMissed && (
                           <button onClick={() => markRouteComplete(a.bookingId)}

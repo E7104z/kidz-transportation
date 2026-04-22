@@ -5,21 +5,23 @@ import {
   Receipt, LogOut, Menu, X, ChevronRight,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useParentContext } from '../context/ParentDataContext';
 import logo from '../assets/KIDZ logo4 site.png';
-
-const navItems = [
-  { to: '/parent/dashboard', label: 'Dashboard',    icon: LayoutDashboard },
-  { to: '/parent/children',  label: 'My Children',  icon: Users },
-  { to: '/parent/services',  label: 'My Services',  icon: BookOpen },
-  { to: '/parent/tracking',  label: 'Live Tracking', icon: Navigation },
-  { to: '/parent/billing',   label: 'Billing',      icon: Receipt },
-  { to: '/parent/profile',   label: 'Profile',      icon: UserCircle },
-];
 
 const ParentLayout: React.FC<React.PropsWithChildren> = ({ children }) => {
   const { user, signOut } = useAuth();
+  const { permissions } = useParentContext();
   const navigate = useNavigate();
   const [mobileOpen, setMobileOpen] = useState(false);
+
+  const navItems = [
+    { to: '/parent/dashboard', label: 'Dashboard',    icon: LayoutDashboard, show: true },
+    { to: '/parent/children',  label: 'My Children',  icon: Users,           show: true },
+    { to: '/parent/services',  label: 'My Services',  icon: BookOpen,        show: true },
+    { to: '/parent/tracking',  label: 'Live Tracking', icon: Navigation,     show: true },
+    { to: '/parent/billing',   label: 'Billing',      icon: Receipt,         show: permissions.canSeeBilling },
+    { to: '/parent/profile',   label: 'Profile',      icon: UserCircle,      show: true },
+  ].filter(item => item.show);
 
   const handleLogout = async () => {
     await signOut();

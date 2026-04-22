@@ -1,40 +1,54 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import { getPlacePredictions } from '../services/placeService';
 
 interface Props {
   value: string;
   onChange: (value: string) => void;
+  onSelect?: (value: string) => void;
   placeholder?: string;
   className?: string;
   id?: string;
 }
 
-const AddressAutocomplete: React.FC<Props> = ({ value, onChange, placeholder, className, id }) => {
+const AddressAutocomplete: React.FC<Props> = ({ value, onChange, onSelect, placeholder, className, id }) => {
   const [suggestions, setSuggestions] = useState<Array<{ description: string; place_id: string }>>([]);
+  const [open, setOpen] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     onChange(val);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (val.length > 2) {
       debounceRef.current = setTimeout(() => {
-        getPlacePredictions(val).then(setSuggestions);
-      }, 200);
+        getPlacePredictions(val).then((results) => {
+          setSuggestions(results);
+          setOpen(results.length > 0);
+        });
+      }, 250);
     } else {
       setSuggestions([]);
+      setOpen(false);
     }
-  };
+  }, [onChange]);
 
-  const handleSelect = (description: string) => {
+  const handleSelect = useCallback((description: string) => {
     onChange(description);
+    onSelect?.(description);
     setSuggestions([]);
-  };
+    setOpen(false);
+  }, [onChange, onSelect]);
 
-  const handleBlur = () => {
-    // Small delay so onMouseDown on suggestion fires first
-    setTimeout(() => setSuggestions([]), 150);
-  };
+  const handleBlur = useCallback(() => {
+    // Delay so onMouseDown on suggestion fires first
+    setTimeout(() => setOpen(false), 150);
+  }, []);
+
+  const handleFocus = useCallback(() => {
+    if (suggestions.length > 0) setOpen(true);
+  }, [suggestions.length]);
+
+  const inputCls = className ?? 'w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500';
 
   return (
     <div className="relative">
@@ -44,11 +58,12 @@ const AddressAutocomplete: React.FC<Props> = ({ value, onChange, placeholder, cl
         value={value}
         onChange={handleChange}
         onBlur={handleBlur}
+        onFocus={handleFocus}
         placeholder={placeholder}
         autoComplete="off"
-        className={className ?? 'w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500'}
+        className={inputCls}
       />
-      {suggestions.length > 0 && (
+      {open && suggestions.length > 0 && (
         <ul className="absolute z-50 left-0 right-0 bg-white border border-slate-200 rounded-xl mt-1 max-h-52 overflow-auto shadow-lg">
           {suggestions.map((s, i) => (
             <li

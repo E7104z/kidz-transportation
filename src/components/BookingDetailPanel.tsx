@@ -3,6 +3,8 @@ import {
   doc,
   updateDoc,
   getDoc,
+  getDocs,
+  writeBatch,
   collection,
   query,
   where,
@@ -35,10 +37,13 @@ const BookingDetailPanel = ({ booking, open, onClose }: {
   const [notes, setNotes] = useState(booking?.notes || '');
   const [contract, setContract] = useState<Contract | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     setMileage(booking?.mileage || 0);
     setNotes(booking?.notes || '');
+    setConfirmDelete(false);
   }, [booking]);
 
   // Subscribe to the most-recent contract for this booking
@@ -316,6 +321,67 @@ const BookingDetailPanel = ({ booking, open, onClose }: {
                 ) : contract ? 'Re-generate Contract' : 'Generate Contract'}
               </button>
             </div>
+          </div>
+
+          {/* Delete Application */}
+          <div className="pt-2">
+            {!confirmDelete ? (
+              <button
+                className="w-full rounded-lg border border-red-200 text-red-600 px-4 py-2 text-sm font-medium hover:bg-red-50 transition-colors"
+                onClick={() => setConfirmDelete(true)}
+              >
+                Delete Application
+              </button>
+            ) : (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                <p className="text-sm text-red-700 mb-3">Are you sure? This will permanently delete this booking, its contract, route assignments, and route logs.</p>
+                <div className="flex gap-2">
+                  <button
+                    className="flex-1 rounded-lg bg-red-600 text-white px-4 py-2 text-sm font-medium hover:bg-red-700 transition-colors disabled:opacity-60"
+                    disabled={deleting}
+                    onClick={async () => {
+                      setDeleting(true);
+                      try {
+                        // Cascade: collect every doc tied to this booking
+                        const refs: ReturnType<typeof doc>[] = [];
+                        refs.push(doc(db, 'bookings', booking.id));
+
+                        const [contractsSnap, assignmentsSnap, logsSnap] = await Promise.all([
+                          getDocs(query(collection(db, 'contracts'),        where('bookingId', '==', booking.id))),
+                          getDocs(query(collection(db, 'routeAssignments'), where('bookingId', '==', booking.id))),
+                          getDocs(query(collection(db, 'routeLogs'),        where('bookingId', '==', booking.id))),
+                        ]);
+                        contractsSnap.forEach(d => refs.push(d.ref));
+                        assignmentsSnap.forEach(d => refs.push(d.ref));
+                        logsSnap.forEach(d => refs.push(d.ref));
+
+                        // Commit in chunks of 400 (batch limit is 500)
+                        for (let i = 0; i < refs.length; i += 400) {
+                          const batch = writeBatch(db);
+                          refs.slice(i, i + 400).forEach(r => batch.delete(r));
+                          await batch.commit();
+                        }
+                        toast.success('Application and related records deleted');
+                        onClose();
+                      } catch (err: any) {
+                        toast.error(err?.message ?? 'Failed to delete');
+                      } finally {
+                        setDeleting(false);
+                        setConfirmDelete(false);
+                      }
+                    }}
+                  >
+                    {deleting ? 'Deleting…' : 'Yes, Delete'}
+                  </button>
+                  <button
+                    className="flex-1 rounded-lg border border-slate-200 text-slate-600 px-4 py-2 text-sm font-medium hover:bg-slate-50 transition-colors"
+                    onClick={() => setConfirmDelete(false)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
         </div>

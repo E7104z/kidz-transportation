@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { createUserWithEmailAndPassword, signInWithPopup, GoogleAuthProvider, signOut as firebaseSignOut } from 'firebase/auth';
 import { collection, getDocs } from 'firebase/firestore';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import { auth, db } from '../../services/firebase';
 import { createUserRecord } from '../../services/userService';
 import { Bus, Lock, Mail, ArrowRight, CheckCircle } from 'lucide-react';
@@ -16,6 +18,10 @@ const GoogleIcon = () => (
 );
 
 const ParentSetup: React.FC = () => {
+  const [searchParams] = useSearchParams();
+  const inviteToken = searchParams.get('invite') ?? '';
+  const isInviteFlow = !!inviteToken;
+
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -31,12 +37,34 @@ const ParentSetup: React.FC = () => {
     ) ?? null;
   };
 
+  const acceptInviteAfterAuth = async (): Promise<boolean> => {
+    try {
+      const fn = httpsCallable(getFunctions(), 'acceptContactInvite');
+      await fn({ token: inviteToken });
+      return true;
+    } catch (err: any) {
+      const msg = err?.message || 'Failed to accept invitation.';
+      setError(msg);
+      try { await firebaseSignOut(auth); } catch {}
+      return false;
+    }
+  };
+
   const handleGoogle = async () => {
     setError('');
     setGoogleLoading(true);
     try {
       const result = await signInWithPopup(auth, new GoogleAuthProvider());
       const googleEmail = result.user.email ?? '';
+
+      if (isInviteFlow) {
+        const ok = await acceptInviteAfterAuth();
+        if (!ok) return;
+        setDone(true);
+        setTimeout(() => { window.location.replace('/parent/dashboard'); }, 1500);
+        return;
+      }
+
       const clientDoc = await lookupClient(googleEmail);
       if (!clientDoc) {
         await firebaseSignOut(auth);
@@ -71,8 +99,20 @@ const ParentSetup: React.FC = () => {
 
     setLoading(true);
     try {
-      // 1. Verify email exists in the clients collection (case-insensitive)
       const trimmed = email.trim().toLowerCase();
+
+      if (isInviteFlow) {
+        // Invite flow: create account with the invite email, then accept invite server-side
+        const cred = await createUserWithEmailAndPassword(auth, trimmed, password);
+        void cred;
+        const ok = await acceptInviteAfterAuth();
+        if (!ok) { setLoading(false); return; }
+        setDone(true);
+        setTimeout(() => { window.location.replace('/parent/dashboard'); }, 1500);
+        return;
+      }
+
+      // 1. Verify email exists in the clients collection (case-insensitive)
       const clientDoc = await lookupClient(trimmed);
       if (!clientDoc) {
         setError('This email is not registered with KIDZ Transportation. Contact us to be added.');
@@ -127,7 +167,9 @@ const ParentSetup: React.FC = () => {
             <>
               <h2 className="text-lg font-bold text-slate-800 mb-1">Create your account</h2>
               <p className="text-sm text-slate-500 mb-6">
-                Use the email address on file with KIDZ Transportation.
+                {isInviteFlow
+                  ? 'Accept your invitation and create your password to join the parent portal.'
+                  : 'Use the email address on file with KIDZ Transportation.'}
               </p>
 
               {error && (

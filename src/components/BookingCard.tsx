@@ -22,6 +22,7 @@ const BookingCard = ({ booking, onSelect }: {
   const parentPhone = booking.client?.phone || '';
   const schoolName = booking.students[0]?.schoolName || '';
   const days = booking.daysOfWeek || [];
+  const isOrphaned = !!booking.orphaned;
   const createdAt = booking.createdAt instanceof Date ? booking.createdAt : (booking.createdAt?.toDate ? booking.createdAt.toDate() : new Date(booking.createdAt));
 
   return (
@@ -30,14 +31,23 @@ const BookingCard = ({ booking, onSelect }: {
       {...attributes}
       {...listeners}
       style={style}
-      className={`bg-white rounded-xl border border-kidz-border shadow-sm p-4 cursor-grab hover:shadow-md hover:border-kidz-blue transition-all duration-200 ${isDragging ? 'opacity-60' : ''}`}
+      className={`bg-white rounded-xl border shadow-sm p-4 cursor-grab hover:shadow-md transition-all duration-200 ${
+        isOrphaned
+          ? 'border-red-300 hover:border-red-400'
+          : 'border-kidz-border hover:border-kidz-blue'
+      } ${isDragging ? 'opacity-60' : ''}`}
       onClick={(e) => {
         if ((e.target as HTMLElement).closest('a')) return;
         onSelect();
       }}
     >
+      {isOrphaned && (
+        <div className="mb-2 inline-flex items-center gap-1 rounded-full bg-red-100 text-red-700 text-[10px] font-semibold px-2 py-0.5 uppercase tracking-wide">
+          Orphaned · client missing
+        </div>
+      )}
       <div className="font-semibold text-kidz-textPrimary text-sm truncate max-w-[140px]">
-        {studentNames || '—'}
+        {studentNames || (isOrphaned ? `Booking ${booking.id.slice(-6)}` : '—')}
       </div>
       <div className="text-xs text-kidz-textSecondary mt-1">
         {parentName}

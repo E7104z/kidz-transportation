@@ -1,8 +1,9 @@
-import { useEffect, useState, useMemo } from 'react';
-import { doc, getDoc, collection, query, where, onSnapshot } from 'firebase/firestore';
+﻿import { useEffect, useState, useMemo, useRef } from 'react';
+import { doc, getDoc, collection, query, where, onSnapshot, getDocs } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import { useAuth } from '../context/AuthContext';
-import type { Booking, Student, RouteLog, Invoice, Client, DriverLocation, RouteAssignment } from '../types';
+import type { Booking, Student, RouteLog, Invoice, Client, DriverLocation, RouteAssignment, Driver, ContactRole, ContactPermissions } from '../types';
+import { DEFAULT_PERMISSIONS } from '../types';
 import { format } from 'date-fns';
 
 export interface ParentData {
@@ -15,10 +16,18 @@ export interface ParentData {
   todayLogs: Record<string, RouteLog>;
   invoices: Invoice[];
   todayStr: string;
-  /** driverId → bookingId mapping (from routeAssignments) */
+  /** driverId â†’ bookingId mapping (from routeAssignments) */
   driverBookingMap: Record<string, string>;
-  /** driverId → real-time GPS location */
+  /** driverId â†’ real-time GPS location */
   driverLocations: Record<string, DriverLocation>;
+  /** driverId â†’ Driver doc (name, photoURL, etc.) */
+  drivers: Record<string, Driver>;
+  /** This contact's role for the linked client (primary by default). */
+  contactRole: ContactRole;
+  /** This contact's permissions — defaults to primary (full access). */
+  permissions: ContactPermissions;
+  /** Convenience flag: is this the primary contact? */
+  isPrimary: boolean;
 }
 
 export function useParentData(): ParentData {
@@ -33,10 +42,15 @@ export function useParentData(): ParentData {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [driverBookingMap, setDriverBookingMap] = useState<Record<string, string>>({});
   const [driverLocations, setDriverLocations] = useState<Record<string, DriverLocation>>({});
+  const [drivers, setDrivers] = useState<Record<string, Driver>>({});
+  const [contactRole, setContactRole] = useState<ContactRole>('primary');
+  const [permissions, setPermissions] = useState<ContactPermissions>(DEFAULT_PERMISSIONS.primary);
+  // Dedupe driver fetches across snapshot ticks + chunks to save Firestore reads
+  const fetchedDriverIds = useRef<Set<string>>(new Set());
 
   const todayStr = useMemo(() => format(new Date(), 'yyyy-MM-dd'), []);
 
-  // Fetch user doc → linkedId → subscribe to bookings, students, invoices
+  // Fetch user doc â†’ linkedId â†’ subscribe to bookings, students, invoices
   useEffect(() => {
     if (!user) return;
     let cancelled = false;
@@ -50,6 +64,24 @@ export function useParentData(): ParentData {
       setParentName(userSnap.data()?.name || user.displayName || user.email || 'Parent');
       if (!linkedId) { setLoading(false); return; }
       setClientId(linkedId);
+
+      // Look up clientAccess to determine this contact's role + permissions.
+      // If no clientAccess doc exists, assume this is the primary parent
+      // (legacy flow — users doc with linkedId is treated as full access).
+      try {
+        const accessSnap = await getDocs(query(
+          collection(db, 'clientAccess'),
+          where('uid', '==', user.uid),
+          where('clientId', '==', linkedId),
+        ));
+        if (!cancelled && !accessSnap.empty) {
+          const data = accessSnap.docs[0].data() as { role: ContactRole; permissions: ContactPermissions };
+          setContactRole(data.role);
+          setPermissions(data.permissions ?? DEFAULT_PERMISSIONS[data.role]);
+        }
+      } catch (err) {
+        console.warn('[useParentData] clientAccess lookup failed:', err);
+      }
 
       // Client record
       const clientSnap = await getDoc(doc(db, 'clients', linkedId));
@@ -111,7 +143,9 @@ export function useParentData(): ParentData {
     return () => unsubs.forEach(u => u());
   }, [bookings, todayStr]);
 
-  // Route assignments → discover which drivers serve this parent's bookings
+  // Route assignments â†’ discover which drivers serve this parent's bookings.
+  // Also fetch each driver's profile doc (one-shot getDoc, deduped) so the
+  // parent portal can show their name + photo.
   useEffect(() => {
     if (bookings.length === 0) return;
     const ids = bookings.filter(b => b.status === 'active').map(b => b.id);
@@ -119,17 +153,50 @@ export function useParentData(): ParentData {
     const chunks: string[][] = [];
     for (let i = 0; i < ids.length; i += 30) chunks.push(ids.slice(i, i + 30));
 
-    const unsubs = chunks.map(chunk =>
+    // Each chunk's latest view of assignments â€” combined on every snapshot tick
+    const perChunk: Array<Record<string, string>> = chunks.map(() => ({}));
+
+    const unsubs = chunks.map((chunk, idx) =>
       onSnapshot(
         query(collection(db, 'routeAssignments'), where('bookingId', 'in', chunk)),
-        snap => {
-          const map: Record<string, string> = {};
+        async snap => {
+          const chunkMap: Record<string, string> = {};
+          const driverIdsInSnap: string[] = [];
           snap.docs.forEach(d => {
             const data = d.data() as RouteAssignment;
-            // Keep the most recent assignment per booking (latest wins)
-            map[data.driverId] = data.bookingId;
+            chunkMap[data.driverId] = data.bookingId;
+            driverIdsInSnap.push(data.driverId);
           });
-          setDriverBookingMap(map);
+          perChunk[idx] = chunkMap;
+
+          const combined: Record<string, string> = {};
+          perChunk.forEach(part => Object.assign(combined, part));
+          setDriverBookingMap(combined);
+
+          // Fetch only driver IDs we haven't already loaded
+          const missing = Array.from(new Set(driverIdsInSnap))
+            .filter(id => id && !fetchedDriverIds.current.has(id));
+          if (missing.length === 0) return;
+          missing.forEach(id => fetchedDriverIds.current.add(id));
+
+          try {
+            const docs = await Promise.all(
+              missing.map(id => getDoc(doc(db, 'drivers', id)))
+            );
+            setDrivers(prev => {
+              const next = { ...prev };
+              docs.forEach((dSnap, i) => {
+                const id = missing[i];
+                if (dSnap.exists()) {
+                  next[id] = { id: dSnap.id, ...dSnap.data() } as Driver;
+                }
+              });
+              return next;
+            });
+          } catch (err) {
+            console.warn('[useParentData] driver fetch failed:', err);
+            missing.forEach(id => fetchedDriverIds.current.delete(id));
+          }
         },
       )
     );
@@ -160,5 +227,21 @@ export function useParentData(): ParentData {
     return () => unsubs.forEach(u => u());
   }, [driverBookingMap]);
 
-  return { loading, parentName, clientId, client, bookings, students, todayLogs, invoices, todayStr, driverBookingMap, driverLocations };
+  return {
+    loading,
+    parentName,
+    clientId,
+    client,
+    bookings,
+    students,
+    todayLogs,
+    invoices,
+    todayStr,
+    driverBookingMap,
+    driverLocations,
+    drivers,
+    contactRole,
+    permissions,
+    isPrimary: contactRole === 'primary',
+  };
 }

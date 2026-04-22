@@ -2,8 +2,8 @@ import React, { useEffect, useState, useMemo } from 'react';
 import { doc, getDoc, collection, query, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../../services/firebase';
 import { useAuth } from '../../context/AuthContext';
-import type { Booking, Student, RouteLog, StudentEvent } from '../../types';
-import { Bus, MapPin, Clock, Calendar, LogOut, CheckCircle, Clock2, FileText, Activity, PauseCircle, UserCheck, UserX, XCircle } from 'lucide-react';
+import type { Booking, Student, RouteLog, StudentEvent, RouteAssignment, Driver } from '../../types';
+import { Bus, MapPin, Clock, Calendar, LogOut, CheckCircle, Clock2, FileText, Activity, PauseCircle, UserCheck, UserX, XCircle, User } from 'lucide-react';
 import { signOut } from '../../services/authService';
 import { useNavigate } from 'react-router-dom';
 import { format } from 'date-fns';
@@ -32,6 +32,8 @@ const ParentStatus: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [parentName, setParentName] = useState('');
   const [todayLogs, setTodayLogs] = useState<Record<string, RouteLog>>({});
+  const [assignments, setAssignments] = useState<RouteAssignment[]>([]);
+  const [drivers, setDrivers] = useState<Record<string, Driver>>({});
 
   const todayStr = useMemo(() => format(new Date(), 'yyyy-MM-dd'), []);
 
@@ -89,6 +91,36 @@ const ParentStatus: React.FC = () => {
     );
     return () => unsubs.forEach(u => u());
   }, [bookings, todayStr]);
+
+  // Subscribe to route assignments for all parent bookings + all drivers (small collection)
+  useEffect(() => {
+    if (bookings.length === 0) return;
+    const ids = bookings.map(b => b.id);
+    const chunks: string[][] = [];
+    for (let i = 0; i < ids.length; i += 30) chunks.push(ids.slice(i, i + 30));
+    const unsubs = chunks.map(chunk =>
+      onSnapshot(
+        query(collection(db, 'routeAssignments'), where('bookingId', 'in', chunk)),
+        snap => setAssignments(prev => {
+          // Replace all assignments that match this chunk's bookingIds with fresh ones
+          const next = prev.filter(a => !chunk.includes(a.bookingId));
+          snap.docs.forEach(d => next.push({ id: d.id, ...d.data() } as RouteAssignment));
+          return next;
+        }),
+      )
+    );
+    const unsubDrivers = onSnapshot(collection(db, 'drivers'), snap => {
+      const map: Record<string, Driver> = {};
+      snap.docs.forEach(d => { map[d.id] = { id: d.id, ...d.data() } as Driver; });
+      setDrivers(map);
+    });
+    return () => { unsubs.forEach(u => u()); unsubDrivers(); };
+  }, [bookings]);
+
+  const driverForBooking = (bookingId: string): Driver | null => {
+    const a = assignments.find(x => x.bookingId === bookingId);
+    return a ? drivers[a.driverId] ?? null : null;
+  };
 
   const handleLogout = async () => {
     await signOut();
@@ -172,6 +204,23 @@ const ParentStatus: React.FC = () => {
                         {b.schoolStartTime || '—'} start · {b.schoolEndTime || '—'} end
                       </div>
                     </div>
+
+                    {/* Driver */}
+                    {(() => {
+                      const drv = driverForBooking(b.id);
+                      if (!drv) return null;
+                      return (
+                        <div className="mt-3 flex items-center gap-2 text-xs bg-teal-50 border border-teal-100 rounded-lg px-3 py-2">
+                          <div className="w-7 h-7 bg-teal-600 rounded-full flex items-center justify-center text-white font-semibold text-xs shrink-0">
+                            {drv.name?.charAt(0)?.toUpperCase() || <User size={12} />}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[10px] font-semibold text-teal-700 uppercase tracking-wide">Driver</div>
+                            <div className="font-medium text-slate-800 truncate">{drv.name}</div>
+                          </div>
+                        </div>
+                      );
+                    })()}
 
                     {/* Today's activity — only show for active bookings */}
                     {b.status === 'active' && (log || true) && (

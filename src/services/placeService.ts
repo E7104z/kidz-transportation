@@ -1,5 +1,5 @@
-// Dynamic loader and wrapper for Google Maps Places Autocomplete
-// Uses the new AutocompleteSuggestion API (replaces deprecated AutocompleteService)
+// Dynamic loader and wrapper for Google Maps Places
+// Uses the new Places API (AutocompleteSuggestion + PlaceAutocompleteElement)
 
 declare global {
   interface Window {
@@ -15,21 +15,20 @@ export function loadGoogleMaps(apiKey: string): Promise<void> {
     if (typeof window === 'undefined') return reject(new Error('Not in browser'));
     if ((window as any).google?.maps?.places) return resolve();
     const script = document.createElement('script');
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&libraries=places,routes`;
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&libraries=places,routes&loading=async`;
     script.async = true;
     script.defer = true;
     script.onload = () => {
-      // Wait for places library to be ready
       const check = (attempts = 0) => {
         if ((window as any).google?.maps?.places) return resolve();
-        if (attempts > 50) return resolve(); // proceed anyway after ~5s
+        if (attempts > 50) return resolve();
         setTimeout(() => check(attempts + 1), 100);
       };
       check();
     };
     script.onerror = (e) => {
       console.error('[Places] Failed to load Google Maps script:', e);
-      loading = null; // allow retry
+      loading = null;
       reject(e);
     };
     document.head.appendChild(script);

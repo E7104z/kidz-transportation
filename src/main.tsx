@@ -12,9 +12,24 @@ createRoot(document.getElementById('root')!).render(
   </StrictMode>
 );
 
-// Register service worker for PWA
+// Register service worker for PWA — force update check on every load
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    navigator.serviceWorker.register('/sw.js').then((reg) => {
+      // Force check for new SW on every page load
+      reg.update();
+      // When a new SW becomes waiting, tell it to activate immediately
+      reg.addEventListener('updatefound', () => {
+        const newSW = reg.installing;
+        if (newSW) {
+          newSW.addEventListener('statechange', () => {
+            if (newSW.state === 'activated') {
+              // New service worker activated — reload to use fresh assets
+              window.location.reload();
+            }
+          });
+        }
+      });
+    }).catch(() => {});
   });
 }

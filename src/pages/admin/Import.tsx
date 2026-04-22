@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import { collection, doc, writeBatch, serverTimestamp, query, where, getDocs } from 'firebase/firestore';
 import { db } from '../../services/firebase';
 import type { TransportationType, BookingStatus } from '../../types';
@@ -6,6 +6,7 @@ import { Upload, Plus, Trash2, CheckCircle } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import AddressAutocomplete from '../../components/AddressAutocomplete';
+import { getMileage } from '../../services/mileageService';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -335,7 +336,14 @@ const Import: React.FC = () => {
   const [parent, setParent] = useState<ParentForm>({ name: '', email: '', phone: '', address: '' });
   const [students, setStudents] = useState<StudentImport[]>([{ ...BLANK_STUDENT }]);
   const [booking, setBooking] = useState<BookingForm>(BLANK_BOOKING);
+  const [importMileage, setImportMileage] = useState(0);
   const [importStatus, setImportStatus] = useState<BookingStatus>('new');
+
+  const tryFetchMileage = useCallback(async (pickup: string, dropoff: string) => {
+    if (!pickup || !dropoff) return;
+    const m = await getMileage(pickup, dropoff);
+    if (m !== null) setImportMileage(m);
+  }, []);
   const [parsed, setParsed] = useState(false);
   const [importing, setImporting] = useState(false);
   const [done, setDone] = useState(false);
@@ -421,7 +429,7 @@ const Import: React.FC = () => {
         emergencyContact: booking.emergencyContact,
         emergencyPhone: booking.emergencyPhone,
         notes: booking.notes,
-        mileage: 0,
+        mileage: importMileage,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
@@ -674,11 +682,11 @@ const Import: React.FC = () => {
               <TwoCol>
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Pickup Address</label>
-                  <AddressAutocomplete value={booking.pickupAddress} onChange={v => setBooking(b => ({ ...b, pickupAddress: v }))} placeholder="Start typing a pickup address…" />
+                  <AddressAutocomplete value={booking.pickupAddress} onChange={v => setBooking(b => ({ ...b, pickupAddress: v }))} onSelect={v => { if (booking.dropoffAddress) tryFetchMileage(v, booking.dropoffAddress); }} placeholder="Start typing a pickup address…" />
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Drop-off Address</label>
-                  <AddressAutocomplete value={booking.dropoffAddress} onChange={v => setBooking(b => ({ ...b, dropoffAddress: v }))} placeholder="Start typing a drop-off address…" />
+                  <AddressAutocomplete value={booking.dropoffAddress} onChange={v => setBooking(b => ({ ...b, dropoffAddress: v }))} onSelect={v => { if (booking.pickupAddress) tryFetchMileage(booking.pickupAddress, v); }} placeholder="Start typing a drop-off address…" />
                 </div>
               </TwoCol>
               <TwoCol>

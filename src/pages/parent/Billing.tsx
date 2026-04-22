@@ -25,7 +25,7 @@ const STATUS_STYLES: Record<string, { label: string; color: string; bg: string; 
 type ViewFilter = 'all' | 'unpaid' | 'paid';
 
 const Billing: React.FC = () => {
-  const { loading, invoices, bookings, client } = useParentContext();
+  const { loading, invoices, bookings, client, permissions, isPrimary } = useParentContext();
   const [filter, setFilter] = useState<ViewFilter>('all');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [payingId, setPayingId] = useState<string | null>(null);
@@ -42,6 +42,20 @@ const Billing: React.FC = () => {
       window.history.replaceState({}, '', window.location.pathname);
     }
   }, []);
+
+  // Gate: secondary parents and coordinators do not see billing.
+  if (!permissions.canSeeBilling) {
+    return (
+      <div className="max-w-xl mx-auto mt-16 p-8 bg-white rounded-2xl shadow-sm border border-slate-200 text-center">
+        <Shield size={40} className="mx-auto text-slate-300 mb-3" />
+        <h2 className="text-lg font-bold text-slate-800">Billing access is restricted</h2>
+        <p className="text-sm text-slate-500 mt-2">
+          Your account doesn&apos;t have permission to view billing information for this family.
+          If you believe this is a mistake, please contact the primary parent or KIDZ Transportation.
+        </p>
+      </div>
+    );
+  }
 
   const sorted = useMemo(() =>
     [...invoices].sort((a, b) => (b.weekOf || b.periodEnd || '').localeCompare(a.weekOf || a.periodEnd || '')),
@@ -211,8 +225,9 @@ const Billing: React.FC = () => {
           </div>
           <button
             onClick={handleToggleAutoPay}
-            disabled={togglingAutoPay}
-            className="flex items-center gap-2 text-sm font-medium transition-colors"
+            disabled={togglingAutoPay || !isPrimary}
+            title={!isPrimary ? 'Only the primary parent can change auto-pay' : undefined}
+            className="flex items-center gap-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {togglingAutoPay ? (
               <Loader2 size={20} className="animate-spin text-slate-400" />

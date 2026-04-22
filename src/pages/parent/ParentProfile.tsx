@@ -13,7 +13,7 @@ import {
 
 const ParentProfile: React.FC = () => {
   const { user } = useAuth();
-  const { loading, parentName, client, clientId } = useParentContext();
+  const { loading, parentName, client, clientId, permissions, isPrimary } = useParentContext();
 
   // Profile edit
   const [editing, setEditing] = useState(false);
@@ -165,19 +165,25 @@ const ParentProfile: React.FC = () => {
                 <ProfileField icon={Phone} label="Phone" value={client?.phone || '—'} />
                 <ProfileField icon={MapPin} label="Address" value={client?.address || '—'} />
               </div>
-              <button
-                onClick={startEdit}
-                className="text-sm text-blue-600 hover:text-blue-700 font-medium transition"
-              >
-                Edit Profile
-              </button>
+              {permissions.canEdit ? (
+                <button
+                  onClick={startEdit}
+                  className="text-sm text-blue-600 hover:text-blue-700 font-medium transition"
+                >
+                  Edit Profile
+                </button>
+              ) : (
+                <div className="text-xs text-slate-400 italic">
+                  Your account has view-only access. Contact the primary parent to request changes.
+                </div>
+              )}
             </>
           )}
         </div>
       </div>
 
-      {/* Password Change — only for email/password users */}
-      {!isGoogleUser && (
+      {/* Password Change — only for email/password users, and only primary contact */}
+      {!isGoogleUser && isPrimary && (
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">

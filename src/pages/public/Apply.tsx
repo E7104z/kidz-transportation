@@ -3,9 +3,9 @@ import StudentSection from '../../components/forms/StudentSection';
 import type { StudentForm } from '../../components/forms/StudentSection';
 import { computeWeeklyCharge } from '../../utils/pricing';
 import { getMileage } from '../../services/mileageService';
-import { getPlacePredictions } from '../../services/placeService';
+import AddressAutocomplete from '../../components/AddressAutocomplete';
 import { db } from '../../services/firebase';
-import { collection, addDoc, serverTimestamp, query, where, getDocs } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { Bus } from 'lucide-react';
 
 type Purpose = 'School' | 'Childcare' | 'Medical' | 'Other' | '';
@@ -256,8 +256,7 @@ const Apply: React.FC = () => {
 	const resetForm = () => dispatch({ type: 'RESET' });
 	const updateStudent = (index: number, value: StudentForm) => dispatch({ type: 'UPDATE_STUDENT', index, value });
 
-	const [pickupSuggestions, setPickupSuggestions] = React.useState<Array<{ description: string; place_id: string }>>([]);
-	const [dropoffSuggestions, setDropoffSuggestions] = React.useState<Array<{ description: string; place_id: string }>>([]);
+
 
 	const tryFetchMileage = async (pickup?: string | null, dropoff?: string | null) => {
 		if (!pickup || !dropoff) return;
@@ -274,23 +273,15 @@ const Apply: React.FC = () => {
 
 	const onPickupChange = (val: string) => {
 		dispatch({ type: 'SET_PICKUP', value: val });
-		if (val.length > 2) getPlacePredictions(val).then(setPickupSuggestions);
-		else setPickupSuggestions([]);
+	};
+	const onPickupSelect = (val: string) => {
+		if (state.dropoffAddress) tryFetchMileage(val, state.dropoffAddress);
 	};
 	const onDropoffChange = (val: string) => {
 		dispatch({ type: 'SET_DROPOFF', value: val });
-		if (val.length > 2) getPlacePredictions(val).then(setDropoffSuggestions);
-		else setDropoffSuggestions([]);
 	};
-	const selectPickupSuggestion = (desc: string) => {
-		dispatch({ type: 'SET_PICKUP', value: desc });
-		setPickupSuggestions([]);
-		if (state.dropoffAddress) tryFetchMileage(desc, state.dropoffAddress);
-	};
-	const selectDropoffSuggestion = (desc: string) => {
-		dispatch({ type: 'SET_DROPOFF', value: desc });
-		setDropoffSuggestions([]);
-		if (state.pickupAddress) tryFetchMileage(state.pickupAddress, desc);
+	const onDropoffSelect = (val: string) => {
+		if (state.pickupAddress) tryFetchMileage(state.pickupAddress, val);
 	};
 
 	const goNext = async () => {
@@ -307,18 +298,13 @@ const Apply: React.FC = () => {
 		dispatch({ type: 'SET_SUBMITTING', value: true });
 		try {
 			const trimmedEmail = state.parent.email.trim().toLowerCase();
-			// Deduplicate: reuse existing client if one exists with this email
-			const existingSnap = await getDocs(query(collection(db, 'clients'), where('email', '==', trimmedEmail)));
-			let clientId: string;
-			if (!existingSnap.empty) {
-				clientId = existingSnap.docs[0].id;
-			} else {
-				const clientRef = await addDoc(collection(db, 'clients'), {
-					name: state.parent.fullName, phone: state.parent.phone, email: trimmedEmail,
-					address: state.parent.address, createdAt: serverTimestamp(),
-				});
-				clientId = clientRef.id;
-			}
+			// Always create a new client doc from public form (no auth = no read access to check dupes).
+			// Admin can merge duplicates later from the Clients page.
+			const clientRef = await addDoc(collection(db, 'clients'), {
+				name: state.parent.fullName, phone: state.parent.phone, email: trimmedEmail,
+				address: state.parent.address, createdAt: serverTimestamp(),
+			});
+			const clientId = clientRef.id;
 			const studentIds = await Promise.all(state.students.map(async (s) => {
 				const ref = await addDoc(collection(db, 'students'), {
 					name: s.fullName, dob: s.dob, age: s.age, grade: s.grade,
@@ -402,34 +388,16 @@ const Apply: React.FC = () => {
 
 	const renderStep3 = () => (
 		<div className="flex flex-col gap-5">
-			<div className="relative">
+			<div>
 				<label className={labelCls}>Pickup Address</label>
-				<input type="text" className={inputCls} value={state.pickupAddress}
-					onChange={e => onPickupChange(e.target.value)}
-					onBlur={e => tryFetchMileage((e.target as HTMLInputElement).value, state.dropoffAddress)} />
-				{pickupSuggestions.length > 0 && (
-					<ul className="absolute z-20 left-0 right-0 bg-white border border-kidz-border rounded-lg mt-1 max-h-48 overflow-auto shadow-md">
-						{pickupSuggestions.map((s, i) => (
-							<li key={s.place_id + i} className="px-4 py-2 hover:bg-kidz-gray cursor-pointer text-sm"
-								onMouseDown={() => selectPickupSuggestion(s.description)}>{s.description}</li>
-						))}
-					</ul>
-				)}
+				<AddressAutocomplete value={state.pickupAddress} onChange={onPickupChange} onSelect={onPickupSelect}
+					placeholder="Start typing an address…" className={inputCls} />
 				{state.errors['pickupAddress'] && <div className={errCls}>{state.errors['pickupAddress']}</div>}
 			</div>
-			<div className="relative">
+			<div>
 				<label className={labelCls}>Dropoff Address</label>
-				<input type="text" className={inputCls} value={state.dropoffAddress}
-					onChange={e => onDropoffChange(e.target.value)}
-					onBlur={e => tryFetchMileage(state.pickupAddress, (e.target as HTMLInputElement).value)} />
-				{dropoffSuggestions.length > 0 && (
-					<ul className="absolute z-20 left-0 right-0 bg-white border border-kidz-border rounded-lg mt-1 max-h-48 overflow-auto shadow-md">
-						{dropoffSuggestions.map((s, i) => (
-							<li key={s.place_id + i} className="px-4 py-2 hover:bg-kidz-gray cursor-pointer text-sm"
-								onMouseDown={() => selectDropoffSuggestion(s.description)}>{s.description}</li>
-						))}
-					</ul>
-				)}
+				<AddressAutocomplete value={state.dropoffAddress} onChange={onDropoffChange} onSelect={onDropoffSelect}
+					placeholder="Start typing an address…" className={inputCls} />
 				{state.errors['dropoffAddress'] && <div className={errCls}>{state.errors['dropoffAddress']}</div>}
 			</div>
 			<div>
@@ -524,7 +492,8 @@ const Apply: React.FC = () => {
 				{state.errors['parent_email'] && <div className={errCls}>{state.errors['parent_email']}</div>}
 			</div>
 			<div><label className={labelCls}>Home Address</label>
-				<input className={inputCls} value={state.parent.address} onChange={e => dispatch({ type: 'SET_PARENT', value: { address: e.target.value } })} />
+				<AddressAutocomplete value={state.parent.address} onChange={v => dispatch({ type: 'SET_PARENT', value: { address: v } })}
+					placeholder="Start typing an address…" className={inputCls} />
 				{state.errors['parent_address'] && <div className={errCls}>{state.errors['parent_address']}</div>}
 			</div>
 		</div>

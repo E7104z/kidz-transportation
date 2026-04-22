@@ -1,11 +1,12 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { db } from '../../services/firebase';
-import { collection, onSnapshot, doc, updateDoc } from 'firebase/firestore';
+import { collection, onSnapshot, doc, updateDoc, getDocs, query, where, writeBatch } from 'firebase/firestore';
 import BookingCard from '../../components/BookingCard';
 import BookingDetailPanel from '../../components/BookingDetailPanel';
 import type { Booking, Client, Student, BookingStatus } from '../../types';
-import { DndContext, closestCenter } from '@dnd-kit/core';
-import { Search, Inbox } from 'lucide-react';
+import { DndContext, closestCenter, useDroppable } from '@dnd-kit/core';
+import { Search, Inbox, AlertTriangle } from 'lucide-react';
+import toast from 'react-hot-toast';
 
 // Column definitions
 const COLUMNS: { key: BookingStatus; label: string; accent: string; badge: string }[] = [
@@ -21,6 +22,17 @@ const COLUMNS: { key: BookingStatus; label: string; accent: string; badge: strin
 type MergedBooking = Booking & {
   client?: Client;
   students: Student[];
+  orphaned?: boolean;
+};
+
+// Droppable column wrapper
+const DroppableColumn: React.FC<{ id: string; children: React.ReactNode }> = ({ id, children }) => {
+  const { setNodeRef, isOver } = useDroppable({ id });
+  return (
+    <div ref={setNodeRef} className={`flex flex-col gap-3 p-3 overflow-y-auto flex-1 max-h-[calc(100vh-200px)] transition-colors rounded-b-2xl ${isOver ? 'bg-indigo-50' : ''}`}>
+      {children}
+    </div>
+  );
 };
 
 const PipelineKanban: React.FC = () => {
@@ -31,6 +43,8 @@ const PipelineKanban: React.FC = () => {
   const [search, setSearch] = useState('');
   const [optimisticBookings, setOptimisticBookings] = useState<Record<string, BookingStatus>>({});
   const [loading, setLoading] = useState(true);
+  const [clientsLoaded, setClientsLoaded] = useState(false);
+  const [cleaning, setCleaning] = useState(false);
 
   // Firestore listeners
   useEffect(() => {
@@ -44,6 +58,7 @@ const PipelineKanban: React.FC = () => {
       const map: Record<string, Client> = {};
       snap.docs.forEach(doc => { map[doc.id] = { id: doc.id, ...doc.data() } as Client; });
       setClients(map);
+      setClientsLoaded(true);
       checkLoaded();
     });
     const unsubStudents = onSnapshot(collection(db, 'students'), snap => {
@@ -59,15 +74,66 @@ const PipelineKanban: React.FC = () => {
     };
   }, []);
 
-  // Merge bookings with client and students
+  // Merge bookings with client and students (flag orphans = missing client)
   const mergedBookings: MergedBooking[] = useMemo(() => {
     return bookings.map(b => ({
       ...b,
       status: optimisticBookings[b.id] || b.status,
       client: clients[b.clientId],
       students: b.studentIds.map(sid => students[sid]).filter(Boolean),
+      orphaned: clientsLoaded && !clients[b.clientId],
     }));
-  }, [bookings, clients, students, optimisticBookings]);
+  }, [bookings, clients, students, optimisticBookings, clientsLoaded]);
+
+  // Orphaned bookings — their parent client doc no longer exists in Firestore
+  const orphanedBookings = useMemo(
+    () => mergedBookings.filter(b => b.orphaned),
+    [mergedBookings],
+  );
+
+  // Bulk-cleanup orphans: cascade delete each orphan booking + its contracts,
+  // routeAssignments, routeLogs. Also cleans up any stray students that
+  // pointed at the (now-missing) client.
+  const cleanupOrphans = async () => {
+    if (orphanedBookings.length === 0) return;
+    setCleaning(true);
+    try {
+      const refs: ReturnType<typeof doc>[] = [];
+      const missingClientIds = new Set<string>();
+
+      for (const b of orphanedBookings) {
+        refs.push(doc(db, 'bookings', b.id));
+        missingClientIds.add(b.clientId);
+        const [contractsSnap, assignmentsSnap, logsSnap] = await Promise.all([
+          getDocs(query(collection(db, 'contracts'),        where('bookingId', '==', b.id))),
+          getDocs(query(collection(db, 'routeAssignments'), where('bookingId', '==', b.id))),
+          getDocs(query(collection(db, 'routeLogs'),        where('bookingId', '==', b.id))),
+        ]);
+        contractsSnap.forEach(d => refs.push(d.ref));
+        assignmentsSnap.forEach(d => refs.push(d.ref));
+        logsSnap.forEach(d => refs.push(d.ref));
+      }
+
+      // Also clean up any students whose client no longer exists
+      await Promise.all(
+        Array.from(missingClientIds).map(async cid => {
+          const sSnap = await getDocs(query(collection(db, 'students'), where('clientId', '==', cid)));
+          sSnap.forEach(d => refs.push(d.ref));
+        })
+      );
+
+      for (let i = 0; i < refs.length; i += 400) {
+        const batch = writeBatch(db);
+        refs.slice(i, i + 400).forEach(r => batch.delete(r));
+        await batch.commit();
+      }
+      toast.success(`Cleaned up ${orphanedBookings.length} orphaned application${orphanedBookings.length === 1 ? '' : 's'}`);
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Cleanup failed');
+    } finally {
+      setCleaning(false);
+    }
+  };
 
   // Search filter
   const filteredBookings = useMemo(() => {
@@ -148,6 +214,27 @@ const PipelineKanban: React.FC = () => {
           </span>
         </div>
       </div>
+      {/* Orphan cleanup banner */}
+      {orphanedBookings.length > 0 && (
+        <div className="mx-8 mt-4 flex items-start gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">
+          <AlertTriangle size={18} className="text-amber-600 flex-shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <div className="text-sm font-semibold text-amber-900">
+              {orphanedBookings.length} orphaned application{orphanedBookings.length === 1 ? '' : 's'} found
+            </div>
+            <div className="text-xs text-amber-800 mt-0.5">
+              These bookings have no matching client record (the client was deleted directly in Firestore). Cleaning up removes the orphan bookings, their contracts, route assignments, route logs, and any dangling students.
+            </div>
+          </div>
+          <button
+            onClick={cleanupOrphans}
+            disabled={cleaning}
+            className="rounded-lg bg-amber-600 text-white px-3 py-1.5 text-xs font-semibold hover:bg-amber-700 transition-colors disabled:opacity-60"
+          >
+            {cleaning ? 'Cleaning…' : 'Clean up'}
+          </button>
+        </div>
+      )}
       {/* Kanban columns */}
       <DndContext collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
         <div className="flex gap-5 overflow-x-auto p-8">
@@ -163,7 +250,7 @@ const PipelineKanban: React.FC = () => {
                     {bookingsInCol.length}
                   </span>
                 </div>
-                <div className="flex flex-col gap-3 p-3 overflow-y-auto flex-1 max-h-[calc(100vh-200px)]">
+                <DroppableColumn id={col.key}>
                   {loading ? (
                     Array.from({ length: 3 }).map((_, i) => (
                       <div key={i} className="bg-white rounded-xl border border-kidz-border p-4 animate-pulse">
@@ -190,7 +277,7 @@ const PipelineKanban: React.FC = () => {
                       />
                     ))
                   )}
-                </div>
+                </DroppableColumn>
               </div>
             );
           })}

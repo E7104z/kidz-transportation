@@ -362,7 +362,7 @@ exports.createCheckoutSession = functions.https.onCall(async (data, context) => 
     await clientSnap.ref.update({ stripeCustomerId: customerId });
   }
 
-  const baseUrl = process.env.APP_URL || 'https://kidz-transportation.web.app';
+  const baseUrl = process.env.APP_URL || 'https://kidz-transportation.com';
 
   const session = await getStripe().checkout.sessions.create({
     customer: customerId,
@@ -840,7 +840,9 @@ exports.createManualInvoice = functions.https.onCall(async (data, context) => {
 // Queue doc shape: { to: string, subject: string, body: string (HTML allowed) }
 // Updates the queue doc with status: 'sent' | 'failed'.
 // ─────────────────────────────────────────────────────────────────────────────
-exports.processEmailQueue = functions.firestore
+exports.processEmailQueue = functions
+  .runWith({ secrets: ['RESEND_API_KEY'] })
+  .firestore
   .document('emailQueue/{itemId}')
   .onCreate(async (snap, context) => {
     const data    = snap.data();
@@ -853,44 +855,49 @@ exports.processEmailQueue = functions.firestore
       return;
     }
 
-    const apiKey  = process.env.SENDGRID_API_KEY;
-    const fromEmail = process.env.EMAIL_FROM || 'noreply@kidztransportation.com';
+    const apiKey    = process.env.RESEND_API_KEY;
+    // Until a custom domain is verified, Resend only allows sending from
+    // onboarding@resend.dev (test) or a verified domain.
+    const fromEmail = process.env.EMAIL_FROM || 'KIDZ Transportation <noreply@kidz-transportation.com>';
 
     if (!apiKey) {
-      console.warn('processEmailQueue: SENDGRID_API_KEY not configured.');
-      await snap.ref.update({ status: 'failed', error: 'SendGrid not configured', processedAt: admin.firestore.FieldValue.serverTimestamp() });
+      console.warn('processEmailQueue: RESEND_API_KEY not configured.');
+      await snap.ref.update({ status: 'failed', error: 'Resend not configured', processedAt: admin.firestore.FieldValue.serverTimestamp() });
       return;
     }
 
     try {
-      const response = await fetch('https://api.sendgrid.com/v3/mail/send', {
+      const response = await fetch('https://api.resend.com/emails', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          personalizations: [{ to: [{ email: to }] }],
-          from: { email: fromEmail },
+          from:    fromEmail,
+          to:      [to],
           subject,
-          content: [{ type: 'text/html', value: body }],
+          html:    body,
         }),
       });
 
-      if (response.ok || response.status === 202) {
+      const result = await response.json().catch(() => ({}));
+
+      if (response.ok && result.id) {
         await snap.ref.update({
           status:      'sent',
+          messageId:   result.id,
           processedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
-        console.log(`Email sent to ${to}: "${subject}"`);
+        console.log(`Email sent to ${to}: "${subject}" (${result.id})`);
       } else {
-        const errText = await response.text();
+        const errMsg = result.message || result.error || `HTTP ${response.status}`;
         await snap.ref.update({
           status: 'failed',
-          error:  `HTTP ${response.status}: ${errText}`,
+          error:  errMsg,
           processedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
-        console.error(`Email failed for ${to}: HTTP ${response.status} — ${errText}`);
+        console.error(`Email failed for ${to}: ${errMsg}`);
       }
     } catch (err) {
       await snap.ref.update({
@@ -1084,20 +1091,39 @@ exports.createMissedRouteLogs = functions.pubsub
 // parent can sign in to the portal. Works for ALL three client creation
 // paths (Apply form, Admin Add Client, Admin Import).
 // ─────────────────────────────────────────────────────────────────────────────
-exports.provisionParentAccount = functions.firestore
-  .document('clients/{clientId}')
-  .onCreate(async (snap, context) => {
-    const clientId = context.params.clientId;
-    const client   = snap.data();
-    const email    = (client.email || '').trim().toLowerCase();
+exports.provisionParentAccount = functions
+  .runWith({ secrets: ['RESEND_API_KEY'] })
+  .firestore
+  .document('bookings/{bookingId}')
+  .onUpdate(async (change, context) => {
+    const before = change.before.data();
+    const after  = change.after.data();
 
-    if (!email) {
-      console.log(`provisionParentAccount: client ${clientId} has no email, skipping.`);
+    // Only fire when status transitions INTO 'active'
+    if (before.status === after.status) return null;
+    if (after.status !== 'active') return null;
+
+    const clientId = after.clientId;
+    if (!clientId) {
+      console.log(`provisionParentAccount: booking ${context.params.bookingId} has no clientId, skipping.`);
       return null;
     }
 
     const db  = admin.firestore();
     const auth = admin.auth();
+
+    const clientSnap = await db.collection('clients').doc(clientId).get();
+    if (!clientSnap.exists) {
+      console.log(`provisionParentAccount: client ${clientId} not found, skipping.`);
+      return null;
+    }
+    const client = clientSnap.data();
+    const email  = (client.email || '').trim().toLowerCase();
+
+    if (!email) {
+      console.log(`provisionParentAccount: client ${clientId} has no email, skipping.`);
+      return null;
+    }
 
     // Check if a users doc already links to this client (e.g. already provisioned)
     const existingLink = await db.collection('users')
@@ -1149,20 +1175,40 @@ exports.provisionParentAccount = functions.firestore
 
     // Send password reset email so the parent can set their own password
     try {
-      const resetLink = await auth.generatePasswordResetLink(email);
+      const resetLink = await auth.generatePasswordResetLink(email, {
+        url: 'https://kidz-transportation.com/login',
+        handleCodeInApp: false,
+      });
       // Queue an email via the existing email queue system
       await db.collection('emailQueue').add({
         to:      email,
-        subject: 'Welcome to KIDZ Transportation — Set Your Password',
-        body:    `<p>Hello ${client.name || ''},</p>
-<p>Your parent portal account has been created. Click the link below to set your password and access your portal:</p>
-<p><a href="${resetLink}">Set Your Password</a></p>
-<p>Once you've set your password, you can sign in at any time to view your child's transportation details.</p>
-<p>— KIDZ Transportation</p>`,
+        subject: 'Welcome to KIDZ Transportation — Activate Your Parent Portal',
+        body: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#1e293b">
+  <h2 style="color:#4f46e5;margin:0 0 16px">Welcome to KIDZ Transportation!</h2>
+  <p>Hi ${client.name || 'there'},</p>
+  <p>Thanks for choosing KIDZ Transportation. Your <strong>Parent Portal</strong> account has been created and is ready to go.</p>
+  <p>From the portal you can:</p>
+  <ul style="padding-left:20px">
+    <li>Track your child's ride in real time</li>
+    <li>View schedules, drivers, and invoices</li>
+    <li>Update pickup/drop-off details</li>
+  </ul>
+  <p style="margin:24px 0">
+    <a href="${resetLink}" style="background:#4f46e5;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block">
+      Set Your Password &amp; Sign In
+    </a>
+  </p>
+  <p style="color:#64748b;font-size:13px">Or paste this link into your browser: <br>${resetLink}</p>
+  <p style="color:#64748b;font-size:13px;margin-top:24px">
+    After setting your password, sign in any time at
+    <a href="https://kidz-transportation.com/login">kidz-transportation.com/login</a>.
+  </p>
+  <p style="color:#94a3b8;font-size:12px;margin-top:32px">— The KIDZ Transportation Team</p>
+</div>`,
         status:    'pending',
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
-      console.log(`provisionParentAccount: password reset email queued for ${email}`);
+      console.log(`provisionParentAccount: welcome email queued for ${email}`);
     } catch (emailErr) {
       console.error(`provisionParentAccount: failed to queue reset email for ${email}:`, emailErr);
       // Non-fatal — account is still created
@@ -1171,6 +1217,110 @@ exports.provisionParentAccount = functions.firestore
     console.log(`provisionParentAccount: ${isNewAccount ? 'created' : 'linked'} account for client ${clientId}`);
     return null;
   });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: sendPortalInvite
+// Admin-triggered manual send/resend of the parent portal setup email for a
+// given clientId. Handles three cases:
+//   1. Auth user exists + users doc linked → just resend password reset email
+//   2. Auth user exists but no users doc → create users doc + send email
+//   3. No Auth user yet → create Auth user + users doc + send email
+// Payload: { clientId: string }
+// Returns: { sent: true, action: 'created' | 'linked' | 'resent' }
+// ─────────────────────────────────────────────────────────────────────────────
+exports.sendPortalInvite = functions.https.onCall(async (data, context) => {
+  await assertAdmin(context);
+
+  const { clientId } = data;
+  if (typeof clientId !== 'string' || !clientId) {
+    throw new functions.https.HttpsError('invalid-argument', 'clientId is required.');
+  }
+
+  const db   = admin.firestore();
+  const auth = admin.auth();
+
+  const clientSnap = await db.collection('clients').doc(clientId).get();
+  if (!clientSnap.exists) {
+    throw new functions.https.HttpsError('not-found', `Client ${clientId} not found.`);
+  }
+  const client = clientSnap.data();
+  const email  = (client.email || '').trim().toLowerCase();
+  if (!email) {
+    throw new functions.https.HttpsError('failed-precondition', 'Client has no email on file.');
+  }
+
+  let uid;
+  let action;
+
+  try {
+    const existing = await auth.getUserByEmail(email);
+    uid = existing.uid;
+    const linkSnap = await db.collection('users')
+      .where('linkedId', '==', clientId)
+      .limit(1)
+      .get();
+    action = linkSnap.empty ? 'linked' : 'resent';
+  } catch (err) {
+    if (err.code !== 'auth/user-not-found') throw err;
+    const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$';
+    let tempPassword = '';
+    for (let i = 0; i < 16; i++) tempPassword += chars[Math.floor(Math.random() * chars.length)];
+    const newUser = await auth.createUser({ email, password: tempPassword, displayName: client.name || '' });
+    uid = newUser.uid;
+    action = 'created';
+  }
+
+  // Upsert users/{uid} so the link to this client exists
+  await db.collection('users').doc(uid).set({
+    role:      'parent',
+    email,
+    name:      client.name || '',
+    linkedId:  clientId,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  const resetLink = await auth.generatePasswordResetLink(email, {
+    url: 'https://kidz-transportation.com/login',
+    handleCodeInApp: false,
+  });
+
+  await db.collection('emailQueue').add({
+    to:      email,
+    subject: action === 'resent'
+      ? 'Your KIDZ Transportation Parent Portal — Reset Link'
+      : 'Welcome to KIDZ Transportation — Activate Your Parent Portal',
+    body: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#1e293b">
+  <h2 style="color:#4f46e5;margin:0 0 16px">${action === 'resent' ? 'Reset your portal password' : 'Welcome to KIDZ Transportation!'}</h2>
+  <p>Hi ${client.name || 'there'},</p>
+  <p>${action === 'resent'
+    ? 'Here is a fresh link to reset your Parent Portal password:'
+    : 'Your <strong>Parent Portal</strong> account is ready. Click below to set your password and sign in.'}</p>
+  <p style="margin:24px 0">
+    <a href="${resetLink}" style="background:#4f46e5;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block">
+      Set Your Password &amp; Sign In
+    </a>
+  </p>
+  <p style="color:#64748b;font-size:13px">Or paste this link into your browser: <br>${resetLink}</p>
+  <p style="color:#64748b;font-size:13px;margin-top:24px">Sign in any time at <a href="https://kidz-transportation.com/login">kidz-transportation.com/login</a>.</p>
+  <p style="color:#94a3b8;font-size:12px;margin-top:32px">— The KIDZ Transportation Team</p>
+</div>`,
+    status:    'pending',
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  await db.collection('auditLog').add({
+    action:     'portal_invite_sent',
+    collection: 'clients',
+    docId:      clientId,
+    actorUid:   context.auth.uid,
+    email,
+    inviteAction: action,
+    timestamp:  admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  console.log(`sendPortalInvite: ${action} for ${email} (client ${clientId})`);
+  return { sent: true, action };
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TRIGGER: calculateBookingMileage
@@ -1243,3 +1393,232 @@ exports.calculateBookingMileage = functions.firestore
 
     return null;
   });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: sendContactInvite
+// Admin invites a secondary or coordinator contact to a client's portal.
+// Creates a clientAccess doc (id = uid_clientId placeholder using a temp key
+// until accepted), stores a one-time token with 14-day expiry, and queues
+// an invite email via the existing emailQueue / processEmailQueue path.
+//
+// Payload: { clientId, email, name, role, permissions }
+// role: 'secondary' | 'coordinator'
+// permissions: { canSeeBilling, canSeeInvoices, canEdit }
+// ─────────────────────────────────────────────────────────────────────────────
+exports.sendContactInvite = functions.https.onCall(async (data, context) => {
+  await assertAdmin(context);
+
+  const { clientId, email, name, role, permissions } = data;
+
+  if (!clientId || !email || !name || !role) {
+    throw new functions.https.HttpsError('invalid-argument', 'clientId, email, name, and role are required.');
+  }
+  if (!['secondary', 'coordinator'].includes(role)) {
+    throw new functions.https.HttpsError('invalid-argument', 'role must be secondary or coordinator.');
+  }
+
+  const db  = admin.firestore();
+  const now = admin.firestore.FieldValue.serverTimestamp();
+
+  // Check for an existing clientAccess doc for this email + clientId
+  const existing = await db.collection('clientAccess')
+    .where('clientId', '==', clientId)
+    .where('email',    '==', email.trim().toLowerCase())
+    .limit(1)
+    .get();
+
+  if (!existing.empty) {
+    throw new functions.https.HttpsError('already-exists', 'A contact with this email already exists for this client.');
+  }
+
+  // Generate a secure random token
+  const crypto = require('crypto');
+  const token  = crypto.randomBytes(32).toString('hex');
+
+  // 14-day expiry
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + 14);
+
+  // Doc id: invite_{clientId}_{token.slice(0,8)} — will be re-keyed to uid_clientId on acceptance
+  const docId  = `invite_${clientId}_${token.slice(0, 8)}`;
+  const docRef = db.collection('clientAccess').doc(docId);
+
+  const resolvedPermissions = permissions ?? {
+    canSeeBilling:  role === 'secondary' ? false : false,
+    canSeeInvoices: role === 'secondary' ? false : false,
+    canEdit:        role === 'secondary' ? true  : false,
+  };
+
+  await docRef.set({
+    clientId,
+    uid:              null,
+    email:            email.trim().toLowerCase(),
+    name:             name.trim(),
+    role,
+    permissions:      resolvedPermissions,
+    inviteToken:      token,
+    inviteStatus:     'pending',
+    inviteExpiresAt:  admin.firestore.Timestamp.fromDate(expiresAt),
+    invitedAt:        now,
+    acceptedAt:       null,
+    createdAt:        now,
+  });
+
+  // Build invite URL — uses the app's base URL from env or a fallback
+  const baseUrl = process.env.APP_BASE_URL || 'https://kidz-transportation.com';
+  const inviteUrl = `${baseUrl}/parent/setup?invite=${token}`;
+
+  // Queue the invite email via existing emailQueue / processEmailQueue path
+  await db.collection('emailQueue').add({
+    to:      email.trim().toLowerCase(),
+    subject: 'You have been invited to the KIDZ Transportation Parent Portal',
+    body: `<p>Hello ${name.trim()},</p>
+<p>You have been added as a contact for a KIDZ Transportation family. Click the link below to create your account and access the parent portal:</p>
+<p><a href="${inviteUrl}" style="background:#4f46e5;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;">Accept Invitation</a></p>
+<p>This link expires in 14 days. If you did not expect this email, you can safely ignore it.</p>
+<p>— KIDZ Transportation<br/>(314) 425-9668</p>`,
+    status:    'pending',
+    createdAt: now,
+  });
+
+  // Audit log
+  await db.collection('auditLog').add({
+    action:    'contact_invite_sent',
+    collection: 'clientAccess',
+    docId,
+    clientId,
+    email:     email.trim().toLowerCase(),
+    role,
+    actorUid:  context.auth.uid,
+    timestamp: now,
+  });
+
+  return { success: true, docId };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: removeContactAccess
+// Admin removes a clientAccess doc. Soft approach: sets inviteStatus to
+// 'expired' and clears the token rather than deleting, preserving audit trail.
+//
+// Payload: { docId }
+// ─────────────────────────────────────────────────────────────────────────────
+exports.removeContactAccess = functions.https.onCall(async (data, context) => {
+  await assertAdmin(context);
+
+  const { docId } = data;
+  if (!docId) throw new functions.https.HttpsError('invalid-argument', 'docId is required.');
+
+  const db  = admin.firestore();
+  const now = admin.firestore.FieldValue.serverTimestamp();
+
+  const ref  = db.collection('clientAccess').doc(docId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new functions.https.HttpsError('not-found', 'clientAccess doc not found.');
+
+  await ref.update({
+    inviteStatus:    'expired',
+    inviteToken:     null,
+    inviteExpiresAt: null,
+    uid:             null,
+  });
+
+  await db.collection('auditLog').add({
+    action:    'contact_access_removed',
+    collection: 'clientAccess',
+    docId,
+    clientId:  snap.data().clientId,
+    email:     snap.data().email,
+    actorUid:  context.auth.uid,
+    timestamp: now,
+  });
+
+  return { success: true };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: acceptContactInvite
+// Called from the parent setup page when a user signs up via an invite token.
+// Validates the token, links the uid, re-keys the doc to uid_clientId,
+// creates/updates the users/{uid} doc, and writes the audit log.
+//
+// Payload: { token }
+// ─────────────────────────────────────────────────────────────────────────────
+exports.acceptContactInvite = functions.https.onCall(async (data, context) => {
+  if (!context.auth) throw new functions.https.HttpsError('unauthenticated', 'Must be signed in.');
+
+  const { token } = data;
+  if (!token) throw new functions.https.HttpsError('invalid-argument', 'token is required.');
+
+  const db   = admin.firestore();
+  const now  = admin.firestore.FieldValue.serverTimestamp();
+  const uid  = context.auth.uid;
+
+  // Find the pending invite doc by token
+  const snap = await db.collection('clientAccess')
+    .where('inviteToken', '==', token)
+    .where('inviteStatus', '==', 'pending')
+    .limit(1)
+    .get();
+
+  if (snap.empty) {
+    throw new functions.https.HttpsError('not-found', 'Invite token is invalid or has already been used.');
+  }
+
+  const inviteDoc  = snap.docs[0];
+  const inviteData = inviteDoc.data();
+
+  // Check expiry
+  const expiresAt = inviteData.inviteExpiresAt?.toDate();
+  if (expiresAt && new Date() > expiresAt) {
+    await inviteDoc.ref.update({ inviteStatus: 'expired' });
+    throw new functions.https.HttpsError('deadline-exceeded', 'This invite link has expired. Please ask your administrator to resend.');
+  }
+
+  // Check email matches the signed-in user
+  const authUser = await admin.auth().getUser(uid);
+  if (authUser.email?.toLowerCase() !== inviteData.email.toLowerCase()) {
+    throw new functions.https.HttpsError('permission-denied', 'The email address on your account does not match this invitation.');
+  }
+
+  const clientId   = inviteData.clientId;
+  const newDocId   = `${uid}_${clientId}`;
+
+  // Use a batch: delete old invite doc, create new uid-keyed doc, upsert users doc
+  const batch = db.batch();
+
+  batch.delete(inviteDoc.ref);
+
+  batch.set(db.collection('clientAccess').doc(newDocId), {
+    ...inviteData,
+    uid,
+    inviteToken:     null,
+    inviteStatus:    'accepted',
+    inviteExpiresAt: null,
+    acceptedAt:      now,
+  });
+
+  // Create or merge users doc so the parent can log in normally
+  batch.set(db.collection('users').doc(uid), {
+    role:      'parent',
+    email:     inviteData.email,
+    name:      inviteData.name,
+    linkedId:  clientId,
+    createdAt: now,
+  }, { merge: true });
+
+  await batch.commit();
+
+  await db.collection('auditLog').add({
+    action:    'contact_invite_accepted',
+    collection: 'clientAccess',
+    docId:     newDocId,
+    clientId,
+    uid,
+    role:      inviteData.role,
+    timestamp: now,
+  });
+
+  return { success: true, clientId, role: inviteData.role };
+});
+
