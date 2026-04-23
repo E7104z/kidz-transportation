@@ -12,9 +12,7 @@ service firebase.storage {
     }
 
     // Driver onboarding documents (W-9, license, insurance, registration).
-    // The driver uploads to their own folder; the folder name is the
-    // drivers/{driverId} document ID, which is verified against the
-    // driver doc's uid field so a driver can only write into their own folder.
+    // The driver uploads to their own folder; admins may also upload/replace.
     match /drivers/{driverId}/onboarding/{fileName} {
       allow read:  if request.auth != null;
       allow write: if request.auth != null
@@ -23,8 +21,35 @@ service firebase.storage {
                         request.resource.contentType.matches('image/.*')
                         || request.resource.contentType == 'application/pdf'
                       )
-                   && firestore.get(/databases/(default)/documents/drivers/$(driverId)).data.uid
-                      == request.auth.uid;
+                   && (
+                        firestore.get(/databases/(default)/documents/drivers/$(driverId)).data.uid
+                          == request.auth.uid
+                        || firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role
+                          == 'admin'
+                      );
+    }
+
+    // Additional driver documents uploaded by admin.
+    match /drivers/{driverId}/additional/{fileName} {
+      allow read:  if request.auth != null;
+      allow write: if request.auth != null
+                   && request.resource.size < 15 * 1024 * 1024
+                   && (
+                        request.resource.contentType.matches('image/.*')
+                        || request.resource.contentType == 'application/pdf'
+                      )
+                   && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role
+                      == 'admin';
+    }
+
+    // Generated client contracts (PDF). Any authenticated user may upload
+    // (admin-only UI enforces who can trigger generation). Any authenticated
+    // user may read (admin downloads, parent email link uses the download URL).
+    match /contracts/{fileName} {
+      allow read:  if request.auth != null;
+      allow write: if request.auth != null
+                   && request.resource.size < 20 * 1024 * 1024
+                   && request.resource.contentType == 'application/pdf';
     }
   }
 }

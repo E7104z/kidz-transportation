@@ -33,6 +33,7 @@ export interface Student {
 
 export type TransportationType = 'roundtrip' | 'am_only' | 'pm_only' | 'midday';
 export type BookingStatus = 'new' | 'under_review' | 'contract_sent' | 'active' | 'paused' | 'completed';
+export type TransportationPurpose = 'School' | 'Daycare' | 'Afterschool' | 'Summer Program' | 'Other';
 
 export interface Booking {
   id: string;
@@ -41,6 +42,7 @@ export interface Booking {
   pickupAddress: string;
   dropoffAddress: string;
   transportationType: TransportationType;
+  transportationPurpose: TransportationPurpose;
   daysOfWeek: string[];
   schoolStartTime: string;
   schoolEndTime: string;
@@ -52,9 +54,19 @@ export interface Booking {
   applicationFeePaid: boolean;
   emergencyContact: string;
   emergencyPhone: string;
+  emergencyContactRelationship: string;
   notes: string;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface DriverDocument {
+  name: string;       // original filename
+  size: number;       // bytes
+  url: string;        // Firebase Storage download URL
+  path: string;       // storage path (for reference)
+  uploadedAt: number; // epoch ms
+  uploadedBy?: 'driver' | 'admin';
 }
 
 export interface Driver {
@@ -64,6 +76,15 @@ export interface Driver {
   phone: string;
   uid: string;
   photoURL?: string;
+  // Required onboarding documents
+  documents?: {
+    driversLicense?: DriverDocument;
+    insurance?: DriverDocument;
+    registration?: DriverDocument;
+    w9?: DriverDocument;
+  };
+  // Flexible bucket for any future document types (background checks, etc.)
+  additionalDocuments?: DriverDocument[];
 }
 
 export type RouteAssignmentStatus = 'pending' | 'paid';
@@ -97,6 +118,13 @@ export interface Contract {
   serviceStartDate: string;
   schoolName: string;
   applicationFeePaid: boolean;
+  // ── Online signature ──────────────────────────────────────────────
+  signingToken?: string;          // opaque URL token issued when the contract is created
+  signedAt?: Timestamp | null;    // when the parent submitted the signature
+  signedByName?: string;          // typed legal name entered at signing
+  signedByEmail?: string;         // email we sent the contract to (audit)
+  signerIp?: string;              // request IP captured server-side
+  signedPdfUrl?: string;          // PDF with signature baked in
 }
 
 export interface EmailQueueItem {

@@ -3,6 +3,7 @@
 const functions = require('firebase-functions');
 const admin     = require('firebase-admin');
 const Stripe    = require('stripe');
+const crypto    = require('crypto');
 
 admin.initializeApp();
 
@@ -188,6 +189,7 @@ exports.saveContractRecord = functions.https.onCall(async (data, context) => {
 
   const now         = admin.firestore.FieldValue.serverTimestamp();
   const contractRef = db.collection('contracts').doc();
+  const signingToken = crypto.randomBytes(32).toString('base64url');
   const batch       = db.batch();
 
   batch.set(contractRef, {
@@ -196,6 +198,8 @@ exports.saveContractRecord = functions.https.onCall(async (data, context) => {
     pdfUrl,
     generatedAt: now,
     sentAt:      null,
+    signingToken,
+    signedAt:    null,
   });
 
   batch.update(bookingRef, {
@@ -213,8 +217,170 @@ exports.saveContractRecord = functions.https.onCall(async (data, context) => {
   });
 
   await batch.commit();
-  return { contractId: contractRef.id };
+  return { contractId: contractRef.id, signingToken };
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: getContractForSigning                                (public)
+// Unauthenticated. Returns the minimum data needed to render the signing
+// page and regenerate the PDF with the parent's signature baked in.
+// The contractId + signingToken pair acts as the authorization credential;
+// invalid or already-signed tokens return permission-denied.
+// Payload: { contractId: string, token: string }
+// ─────────────────────────────────────────────────────────────────────────────
+exports.getContractForSigning = functions.https.onCall(async (data /* , context */) => {
+  const { contractId, token } = data || {};
+  if (typeof contractId !== 'string' || !contractId)
+    throw new functions.https.HttpsError('invalid-argument', 'contractId is required.');
+  if (typeof token !== 'string' || !token)
+    throw new functions.https.HttpsError('invalid-argument', 'token is required.');
+
+  const db          = admin.firestore();
+  const contractRef = db.collection('contracts').doc(contractId);
+  const contractSnap = await contractRef.get();
+  if (!contractSnap.exists)
+    throw new functions.https.HttpsError('not-found', 'Contract not found.');
+
+  const contract = contractSnap.data();
+  if (contract.signingToken !== token)
+    throw new functions.https.HttpsError('permission-denied', 'Invalid signing link.');
+
+  const bookingSnap = await db.collection('bookings').doc(contract.bookingId).get();
+  if (!bookingSnap.exists)
+    throw new functions.https.HttpsError('not-found', 'Booking not found.');
+  const booking = { id: bookingSnap.id, ...bookingSnap.data() };
+
+  const clientSnap = await db.collection('clients').doc(booking.clientId).get();
+  if (!clientSnap.exists)
+    throw new functions.https.HttpsError('not-found', 'Client not found.');
+  const client = { id: clientSnap.id, ...clientSnap.data() };
+
+  const studentsSnap = await db.collection('students')
+    .where('clientId', '==', booking.clientId).get();
+  const students = studentsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+  // Normalize serviceStartDate (Timestamp → Date serializable)
+  const ssd = booking.serviceStartDate;
+  if (ssd && typeof ssd.toDate === 'function') {
+    booking.serviceStartDate = ssd.toDate().toISOString();
+  }
+
+  return {
+    contract: {
+      id: contractSnap.id,
+      pdfUrl: contract.pdfUrl,
+      studentNames: contract.studentNames || [],
+      signedAt: contract.signedAt || null,
+      signedByName: contract.signedByName || null,
+      signedPdfUrl: contract.signedPdfUrl || null,
+    },
+    booking,
+    client,
+    students,
+    alreadySigned: !!contract.signedAt,
+  };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: finalizeContractSignature                            (public)
+// Unauthenticated. Accepts the signed PDF (base64) + signature metadata.
+// Verifies the signing token, uploads the signed PDF to Storage, updates
+// the contract doc, moves the booking to 'active', and writes an audit log.
+// Payload: {
+//   contractId, token,
+//   signedPdfBase64,   // base64-encoded PDF content (no data: prefix)
+//   signatureDataUrl,  // data:image/png;base64,... (stored for audit)
+//   signedByName
+// }
+// Returns: { signedPdfUrl: string }
+// ─────────────────────────────────────────────────────────────────────────────
+exports.finalizeContractSignature = functions
+  .runWith({ memory: '512MB', timeoutSeconds: 60 })
+  .https.onCall(async (data, context) => {
+    const { contractId, token, signedPdfBase64, signatureDataUrl, signedByName } = data || {};
+    if (typeof contractId !== 'string' || !contractId)
+      throw new functions.https.HttpsError('invalid-argument', 'contractId is required.');
+    if (typeof token !== 'string' || !token)
+      throw new functions.https.HttpsError('invalid-argument', 'token is required.');
+    if (typeof signedPdfBase64 !== 'string' || signedPdfBase64.length < 100)
+      throw new functions.https.HttpsError('invalid-argument', 'signedPdfBase64 is required.');
+    if (typeof signatureDataUrl !== 'string' || !signatureDataUrl.startsWith('data:image/'))
+      throw new functions.https.HttpsError('invalid-argument', 'signatureDataUrl is required.');
+    if (typeof signedByName !== 'string' || signedByName.trim().length < 2)
+      throw new functions.https.HttpsError('invalid-argument', 'signedByName is required.');
+
+    // Cap PDF size at 10 MB decoded to prevent abuse
+    const approxBytes = Math.floor((signedPdfBase64.length * 3) / 4);
+    if (approxBytes > 10 * 1024 * 1024)
+      throw new functions.https.HttpsError('invalid-argument', 'Signed PDF exceeds 10 MB limit.');
+
+    const db          = admin.firestore();
+    const contractRef = db.collection('contracts').doc(contractId);
+    const contractSnap = await contractRef.get();
+    if (!contractSnap.exists)
+      throw new functions.https.HttpsError('not-found', 'Contract not found.');
+    const contract = contractSnap.data();
+
+    if (contract.signingToken !== token)
+      throw new functions.https.HttpsError('permission-denied', 'Invalid signing link.');
+
+    if (contract.signedAt)
+      throw new functions.https.HttpsError('already-exists', 'This contract has already been signed.');
+
+    // Upload the signed PDF to Storage
+    const bucket    = admin.storage().bucket();
+    const pdfBuffer = Buffer.from(signedPdfBase64, 'base64');
+    const fileName  = `contracts/${contract.bookingId}_${contractId}_signed_${Date.now()}.pdf`;
+    const file      = bucket.file(fileName);
+
+    // Use a random download token so the getDownloadURL pattern works
+    const downloadToken = crypto.randomBytes(16).toString('hex');
+    await file.save(pdfBuffer, {
+      metadata: {
+        contentType: 'application/pdf',
+        metadata: { firebaseStorageDownloadTokens: downloadToken },
+      },
+      resumable: false,
+    });
+    const signedPdfUrl =
+      `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/` +
+      `${encodeURIComponent(fileName)}?alt=media&token=${downloadToken}`;
+
+    const now     = admin.firestore.FieldValue.serverTimestamp();
+    const ip      = (context.rawRequest && (context.rawRequest.ip || context.rawRequest.headers?.['x-forwarded-for'])) || '';
+    const signerIp = typeof ip === 'string' ? ip.split(',')[0].trim().slice(0, 64) : '';
+
+    const bookingRef = db.collection('bookings').doc(contract.bookingId);
+    const batch = db.batch();
+
+    batch.update(contractRef, {
+      signedAt:     now,
+      signedByName: signedByName.trim().slice(0, 120),
+      signedByEmail: contract.emailedTo || '',
+      signerIp,
+      signedPdfUrl,
+      pdfUrl:        signedPdfUrl,        // swap primary URL to the signed PDF
+      // One-shot: invalidate the signing token so the link can't be reused
+      signingToken:  admin.firestore.FieldValue.delete(),
+    });
+
+    batch.update(bookingRef, { status: 'active' });
+
+    batch.set(db.collection('auditLog').doc(), {
+      action:     'contract_signed',
+      collection: 'contracts',
+      docId:      contractId,
+      bookingId:  contract.bookingId,
+      actorUid:   null,        // unauthenticated — parent via signing link
+      signedByName: signedByName.trim().slice(0, 120),
+      signerIp,
+      timestamp:  now,
+    });
+
+    await batch.commit();
+
+    return { signedPdfUrl };
+  });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TRIGGER: processSmsQueue

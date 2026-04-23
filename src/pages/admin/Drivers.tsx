@@ -1,9 +1,9 @@
 import React, { useEffect, useState, useMemo, useRef } from 'react';
-import { collection, onSnapshot, addDoc, deleteDoc, doc, updateDoc, serverTimestamp, getDocs, query, where, writeBatch } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { collection, onSnapshot, addDoc, deleteDoc, doc, getDoc, updateDoc, serverTimestamp, getDocs, query, where, writeBatch } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL, uploadBytesResumable } from 'firebase/storage';
 import { db, storage } from '../../services/firebase';
-import type { Driver, RouteAssignment, Booking, Client, Student } from '../../types';
-import { Car, Mail, Phone, Plus, X, Check, Link as LinkIcon, MapPin, Clock, Trash2, AlertTriangle, Pencil, Camera, User as UserIcon } from 'lucide-react';
+import type { Driver, DriverDocument, RouteAssignment, Booking, Client, Student } from '../../types';
+import { Car, Mail, Phone, Plus, X, Check, Link as LinkIcon, MapPin, Clock, Trash2, AlertTriangle, Pencil, Camera, User as UserIcon, FileText, UploadCloud, ExternalLink, Download, Loader2 } from 'lucide-react';
 
 interface DriverForm {
   name: string;
@@ -42,10 +42,25 @@ const Drivers: React.FC = () => {
   // Edit driver state
   const [editTarget, setEditTarget]   = useState<Driver | null>(null);
   const [editForm,   setEditForm]     = useState<DriverForm>({ name: '', email: '', phone: '' });
+  const [editTab,    setEditTab]      = useState<'info' | 'documents'>('info');
   const [savingEdit, setSavingEdit]   = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [editPhotoURL, setEditPhotoURL] = useState<string | null>(null);
   const editFileRef = useRef<HTMLInputElement>(null);
+
+  // Per-doc upload state for the Documents tab
+  type RequiredDocKey = 'driversLicense' | 'insurance' | 'registration' | 'w9';
+  const REQUIRED_DOCS: { key: RequiredDocKey; label: string }[] = [
+    { key: 'driversLicense', label: "Driver's License" },
+    { key: 'insurance',      label: 'Vehicle Insurance Card' },
+    { key: 'registration',   label: 'Vehicle Registration' },
+    { key: 'w9',             label: 'Signed W-9 Form' },
+  ];
+  const [docUploading, setDocUploading] = useState<Record<string, boolean>>({});
+  const [docProgress,  setDocProgress]  = useState<Record<string, number>>({});
+  const docFileRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const [additionalUploading, setAdditionalUploading] = useState(false);
+  const additionalFileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let count = 0;
@@ -182,17 +197,119 @@ const Drivers: React.FC = () => {
     }
   };
 
-  const openEdit = (d: Driver) => {
+  const openEdit = async (d: Driver) => {
     setEditTarget(d);
     setEditForm({ name: d.name || '', email: d.email || '', phone: d.phone || '' });
     setEditPhotoURL(d.photoURL || null);
+    setEditTab('info');
+    setDocUploading({});
+    setDocProgress({});
+
+    // If the top-level driver doc has no documents yet, check the onboarding
+    // subcollection (where DriverOnboarding.tsx stores them) and back-fill.
+    if (!d.documents) {
+      try {
+        const profileSnap = await getDoc(doc(db, 'drivers', d.id, 'onboarding', 'profile'));
+        if (profileSnap.exists()) {
+          const profileData = profileSnap.data();
+          const subDocs = profileData?.documents as Driver['documents'] | undefined;
+          if (subDocs) {
+            // Write to top-level doc so it appears immediately and on all
+            // future opens without needing the subcollection fetch.
+            await updateDoc(doc(db, 'drivers', d.id), { documents: subDocs });
+            setEditTarget(prev => prev ? { ...prev, documents: subDocs } : prev);
+          }
+        }
+      } catch {
+        // Non-fatal — documents tab will just show as missing
+      }
+    }
   };
 
   const closeEdit = () => {
     setEditTarget(null);
     setEditForm({ name: '', email: '', phone: '' });
     setEditPhotoURL(null);
+    setEditTab('info');
     if (editFileRef.current) editFileRef.current.value = '';
+  };
+
+  // Upload a required document from the admin side
+  const uploadRequiredDoc = (key: RequiredDocKey, file: File) => {
+    if (!editTarget) return;
+    const MAX = 10 * 1024 * 1024;
+    if (!['application/pdf','image/jpeg','image/png','image/jpg'].includes(file.type)) {
+      alert('File must be PDF, JPG, or PNG.'); return;
+    }
+    if (file.size > MAX) { alert('File must be under 10 MB.'); return; }
+
+    const ext = file.name.split('.').pop()?.toLowerCase() || 'bin';
+    const ts  = Date.now();
+    const path = `drivers/${editTarget.id}/onboarding/${key}_${ts}.${ext}`;
+    const r    = ref(storage, path);
+    const task = uploadBytesResumable(r, file, { contentType: file.type });
+
+    setDocUploading(p => ({ ...p, [key]: true }));
+    setDocProgress(p => ({ ...p, [key]: 0 }));
+
+    task.on('state_changed',
+      snap => {
+        const pct = snap.totalBytes ? (snap.bytesTransferred / snap.totalBytes) * 100 : 0;
+        setDocProgress(p => ({ ...p, [key]: pct }));
+      },
+      err => {
+        setDocUploading(p => ({ ...p, [key]: false }));
+        alert('Upload failed: ' + err.message);
+      },
+      async () => {
+        const url = await getDownloadURL(task.snapshot.ref);
+        const docValue: DriverDocument = { name: file.name, size: file.size, url, path, uploadedAt: ts, uploadedBy: 'admin' };
+        await updateDoc(doc(db, 'drivers', editTarget.id), {
+          [`documents.${key}`]: docValue,
+        });
+        setEditTarget(prev => prev ? {
+          ...prev,
+          documents: { ...prev.documents, [key]: docValue },
+        } : prev);
+        setDocUploading(p => ({ ...p, [key]: false }));
+        setDocProgress(p => ({ ...p, [key]: 100 }));
+      }
+    );
+  };
+
+  // Upload an additional (non-required) document
+  const uploadAdditionalDoc = async (file: File) => {
+    if (!editTarget) return;
+    const MAX = 10 * 1024 * 1024;
+    if (!['application/pdf','image/jpeg','image/png','image/jpg'].includes(file.type)) {
+      alert('File must be PDF, JPG, or PNG.'); return;
+    }
+    if (file.size > MAX) { alert('File must be under 10 MB.'); return; }
+    setAdditionalUploading(true);
+    try {
+      const ext  = file.name.split('.').pop()?.toLowerCase() || 'bin';
+      const ts   = Date.now();
+      const path = `drivers/${editTarget.id}/additional/${ts}.${ext}`;
+      const r    = ref(storage, path);
+      await uploadBytes(r, file, { contentType: file.type });
+      const url = await getDownloadURL(r);
+      const entry: DriverDocument = { name: file.name, size: file.size, url, path, uploadedAt: ts, uploadedBy: 'admin' };
+      const updated = [...(editTarget.additionalDocuments || []), entry];
+      await updateDoc(doc(db, 'drivers', editTarget.id), { additionalDocuments: updated });
+      setEditTarget(prev => prev ? { ...prev, additionalDocuments: updated } : prev);
+    } catch (err: any) {
+      alert('Upload failed: ' + err.message);
+    } finally {
+      setAdditionalUploading(false);
+      if (additionalFileRef.current) additionalFileRef.current.value = '';
+    }
+  };
+
+  const deleteAdditionalDoc = async (idx: number) => {
+    if (!editTarget) return;
+    const updated = (editTarget.additionalDocuments || []).filter((_, i) => i !== idx);
+    await updateDoc(doc(db, 'drivers', editTarget.id), { additionalDocuments: updated });
+    setEditTarget(prev => prev ? { ...prev, additionalDocuments: updated } : prev);
   };
 
   const saveEdit = async () => {
@@ -602,98 +719,230 @@ const Drivers: React.FC = () => {
       {editTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/40" onClick={closeEdit} />
-          <div className="relative z-10 bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-5">
-              <h3 className="text-lg font-bold text-slate-800">Edit Driver</h3>
+          <div className="relative z-10 bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[92vh] flex flex-col">
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+              <h3 className="text-lg font-bold text-slate-800">{editTarget.name || 'Edit Driver'}</h3>
               <button onClick={closeEdit} className="p-1.5 hover:bg-slate-100 rounded-lg transition-colors">
                 <X size={18} className="text-slate-500" />
               </button>
             </div>
 
-            {/* Photo */}
-            <div className="flex flex-col items-center mb-5">
-              <div className="relative">
-                {editPhotoURL ? (
-                  <img
-                    src={editPhotoURL}
-                    alt={editForm.name}
-                    className="w-28 h-28 rounded-full object-cover border-4 border-white shadow-lg ring-2 ring-teal-100"
-                  />
-                ) : (
-                  <div className="w-28 h-28 rounded-full bg-slate-200 border-4 border-white shadow-lg ring-2 ring-teal-100 flex items-center justify-center text-slate-400">
-                    <UserIcon size={44} />
-                  </div>
-                )}
+            {/* Tabs */}
+            <div className="flex border-b border-slate-100 px-6">
+              {(['info', 'documents'] as const).map(t => (
                 <button
-                  type="button"
-                  onClick={() => editFileRef.current?.click()}
-                  disabled={uploadingPhoto}
-                  className="absolute bottom-0 right-0 bg-teal-600 hover:bg-teal-700 text-white rounded-full p-2 shadow-md border-2 border-white disabled:opacity-60"
-                  title="Upload photo"
+                  key={t}
+                  onClick={() => setEditTab(t)}
+                  className={`py-3 px-4 text-sm font-semibold border-b-2 -mb-px transition-colors ${
+                    editTab === t
+                      ? 'border-teal-500 text-teal-700'
+                      : 'border-transparent text-slate-400 hover:text-slate-700'
+                  }`}
                 >
-                  {uploadingPhoto
-                    ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                    : <Camera size={14} />}
+                  {t === 'info' ? 'Info' : 'Documents'}
                 </button>
-                <input
-                  ref={editFileRef}
-                  type="file"
-                  accept="image/*"
-                  onChange={uploadEditPhoto}
-                  className="hidden"
-                />
-              </div>
-              <button
-                type="button"
-                onClick={() => editFileRef.current?.click()}
-                className="text-xs text-teal-600 hover:text-teal-700 font-semibold mt-2"
-              >
-                {editPhotoURL ? 'Change photo' : 'Upload photo'}
-              </button>
-            </div>
-
-            {/* Fields */}
-            <div className="space-y-3">
-              {[
-                { label: 'Full Name', key: 'name',  type: 'text',  placeholder: 'John Smith' },
-                { label: 'Email',     key: 'email', type: 'email', placeholder: 'john@example.com' },
-                { label: 'Phone',     key: 'phone', type: 'tel',   placeholder: '(314) 555-0000' },
-              ].map(({ label, key, type, placeholder }) => (
-                <div key={key}>
-                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">{label}</label>
-                  <input
-                    type={type}
-                    placeholder={placeholder}
-                    value={editForm[key as keyof DriverForm]}
-                    onChange={e => setEditForm(f => ({ ...f, [key]: e.target.value }))}
-                    className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 transition"
-                  />
-                </div>
               ))}
             </div>
 
-            {editTarget.uid && editForm.email.trim().toLowerCase() !== (editTarget.email || '').toLowerCase() && (
-              <div className="mt-3 flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 text-xs text-amber-800">
-                <AlertTriangle size={14} className="flex-shrink-0 mt-0.5" />
-                <span>This driver has a linked login. Changing the email here won't change their sign-in email — they'll still log in with <b>{editTarget.email}</b>. To change that, delete + recreate the login.</span>
-              </div>
-            )}
+            <div className="overflow-y-auto flex-1 p-6">
+              {/* ── INFO TAB ─────────────────────────────────────────────── */}
+              {editTab === 'info' && (
+                <>
+                  {/* Photo */}
+                  <div className="flex flex-col items-center mb-5">
+                    <div className="relative">
+                      {editPhotoURL ? (
+                        <img
+                          src={editPhotoURL}
+                          alt={editForm.name}
+                          className="w-28 h-28 rounded-full object-cover border-4 border-white shadow-lg ring-2 ring-teal-100"
+                        />
+                      ) : (
+                        <div className="w-28 h-28 rounded-full bg-slate-200 border-4 border-white shadow-lg ring-2 ring-teal-100 flex items-center justify-center text-slate-400">
+                          <UserIcon size={44} />
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => editFileRef.current?.click()}
+                        disabled={uploadingPhoto}
+                        className="absolute bottom-0 right-0 bg-teal-600 hover:bg-teal-700 text-white rounded-full p-2 shadow-md border-2 border-white disabled:opacity-60"
+                        title="Upload photo"
+                      >
+                        {uploadingPhoto
+                          ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                          : <Camera size={14} />}
+                      </button>
+                      <input ref={editFileRef} type="file" accept="image/*" onChange={uploadEditPhoto} className="hidden" />
+                    </div>
+                    <button type="button" onClick={() => editFileRef.current?.click()} className="text-xs text-teal-600 hover:text-teal-700 font-semibold mt-2">
+                      {editPhotoURL ? 'Change photo' : 'Upload photo'}
+                    </button>
+                  </div>
 
-            <div className="flex gap-2 mt-5">
-              <button
-                onClick={closeEdit}
-                className="flex-1 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-xl py-2.5 text-sm font-semibold transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={saveEdit}
-                disabled={savingEdit || !editForm.name.trim()}
-                className="flex-1 bg-teal-600 hover:bg-teal-700 text-white rounded-xl py-2.5 text-sm font-semibold flex items-center justify-center gap-2 disabled:opacity-60 transition-colors"
-              >
-                {savingEdit && <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />}
-                {savingEdit ? 'Saving…' : 'Save Changes'}
-              </button>
+                  {/* Fields */}
+                  <div className="space-y-3">
+                    {([
+                      { label: 'Full Name', key: 'name',  type: 'text',  placeholder: 'John Smith' },
+                      { label: 'Email',     key: 'email', type: 'email', placeholder: 'john@example.com' },
+                      { label: 'Phone',     key: 'phone', type: 'tel',   placeholder: '(314) 555-0000' },
+                    ] as const).map(({ label, key, type, placeholder }) => (
+                      <div key={key}>
+                        <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">{label}</label>
+                        <input
+                          type={type}
+                          placeholder={placeholder}
+                          value={editForm[key as keyof DriverForm]}
+                          onChange={e => setEditForm(f => ({ ...f, [key]: e.target.value }))}
+                          className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 transition"
+                        />
+                      </div>
+                    ))}
+                  </div>
+
+                  {editTarget.uid && editForm.email.trim().toLowerCase() !== (editTarget.email || '').toLowerCase() && (
+                    <div className="mt-3 flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 text-xs text-amber-800">
+                      <AlertTriangle size={14} className="flex-shrink-0 mt-0.5" />
+                      <span>This driver has a linked login. Changing the email here won't change their sign-in email — they'll still log in with <b>{editTarget.email}</b>.</span>
+                    </div>
+                  )}
+
+                  <div className="flex gap-2 mt-5">
+                    <button onClick={closeEdit} className="flex-1 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-xl py-2.5 text-sm font-semibold transition-colors">Cancel</button>
+                    <button
+                      onClick={saveEdit}
+                      disabled={savingEdit || !editForm.name.trim()}
+                      className="flex-1 bg-teal-600 hover:bg-teal-700 text-white rounded-xl py-2.5 text-sm font-semibold flex items-center justify-center gap-2 disabled:opacity-60 transition-colors"
+                    >
+                      {savingEdit && <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />}
+                      {savingEdit ? 'Saving…' : 'Save Changes'}
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {/* ── DOCUMENTS TAB ─────────────────────────────────────────── */}
+              {editTab === 'documents' && (
+                <div className="space-y-4">
+                  {/* Required documents */}
+                  <div>
+                    <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">Required Documents</p>
+                    <div className="space-y-3">
+                      {REQUIRED_DOCS.map(({ key, label }) => {
+                        const existing = editTarget.documents?.[key];
+                        const uploading = !!docUploading[key];
+                        const progress  = docProgress[key] ?? 0;
+                        return (
+                          <div key={key} className="border border-slate-200 rounded-xl p-4">
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="text-sm font-semibold text-slate-700">{label}</span>
+                              {existing ? (
+                                <span className="text-xs bg-emerald-100 text-emerald-700 font-medium px-2 py-0.5 rounded-full">Uploaded</span>
+                              ) : (
+                                <span className="text-xs bg-slate-100 text-slate-500 font-medium px-2 py-0.5 rounded-full">Missing</span>
+                              )}
+                            </div>
+
+                            {existing && (
+                              <div className="flex items-center gap-2 text-xs text-slate-500 mb-3 bg-slate-50 rounded-lg px-3 py-2">
+                                <FileText size={12} className="shrink-0" />
+                                <span className="truncate flex-1">{existing.name}</span>
+                                <span className="shrink-0">{(existing.size / 1024).toFixed(0)} KB</span>
+                                {existing.uploadedBy === 'admin' && (
+                                  <span className="text-xs text-teal-600 font-medium shrink-0">Admin</span>
+                                )}
+                                <a href={existing.url} target="_blank" rel="noopener noreferrer" title="View" className="shrink-0 text-violet-500 hover:text-violet-700">
+                                  <ExternalLink size={13} />
+                                </a>
+                                <a href={existing.url} download={existing.name} title="Download" className="shrink-0 text-teal-600 hover:text-teal-800">
+                                  <Download size={13} />
+                                </a>
+                              </div>
+                            )}
+
+                            {uploading && (
+                              <div className="mb-3">
+                                <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
+                                  <span>Uploading…</span><span>{Math.round(progress)}%</span>
+                                </div>
+                                <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                                  <div className="h-full bg-teal-500 rounded-full transition-all" style={{ width: `${progress}%` }} />
+                                </div>
+                              </div>
+                            )}
+
+                            <input
+                              ref={el => { docFileRefs.current[key] = el; }}
+                              type="file"
+                              accept="application/pdf,image/jpeg,image/png"
+                              className="hidden"
+                              onChange={e => {
+                                const f = e.target.files?.[0];
+                                if (f) uploadRequiredDoc(key, f);
+                                e.target.value = '';
+                              }}
+                            />
+                            <button
+                              onClick={() => docFileRefs.current[key]?.click()}
+                              disabled={uploading}
+                              className="w-full flex items-center justify-center gap-2 border border-dashed border-slate-300 hover:border-teal-400 hover:bg-teal-50 text-slate-500 hover:text-teal-700 rounded-lg py-2 text-xs font-semibold transition-colors disabled:opacity-50"
+                            >
+                              <UploadCloud size={13} />
+                              {existing ? 'Replace' : 'Upload'} (PDF / JPG / PNG, max 10 MB)
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Additional documents */}
+                  <div>
+                    <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">Additional Documents</p>
+                    {(editTarget.additionalDocuments || []).length === 0 && (
+                      <p className="text-xs text-slate-400 mb-3">No additional documents uploaded yet.</p>
+                    )}
+                    <div className="space-y-2 mb-3">
+                      {(editTarget.additionalDocuments || []).map((d, i) => (
+                        <div key={i} className="flex items-center gap-2 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+                          <FileText size={12} className="shrink-0 text-slate-400" />
+                          <span className="flex-1 truncate">{d.name}</span>
+                          <span className="shrink-0 text-slate-400">{(d.size / 1024).toFixed(0)} KB</span>
+                          <a href={d.url} target="_blank" rel="noopener noreferrer" className="shrink-0 text-violet-500 hover:text-violet-700" title="View">
+                            <ExternalLink size={13} />
+                          </a>
+                          <a href={d.url} download={d.name} className="shrink-0 text-teal-600 hover:text-teal-800" title="Download">
+                            <Download size={13} />
+                          </a>
+                          <button onClick={() => deleteAdditionalDoc(i)} className="shrink-0 text-slate-300 hover:text-red-400 transition-colors" title="Remove">
+                            <X size={13} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <input
+                      ref={additionalFileRef}
+                      type="file"
+                      accept="application/pdf,image/jpeg,image/png"
+                      className="hidden"
+                      onChange={e => {
+                        const f = e.target.files?.[0];
+                        if (f) uploadAdditionalDoc(f);
+                      }}
+                    />
+                    <button
+                      onClick={() => additionalFileRef.current?.click()}
+                      disabled={additionalUploading}
+                      className="w-full flex items-center justify-center gap-2 border border-dashed border-slate-300 hover:border-teal-400 hover:bg-teal-50 text-slate-500 hover:text-teal-700 rounded-lg py-2 text-xs font-semibold transition-colors disabled:opacity-50"
+                    >
+                      {additionalUploading
+                        ? <><Loader2 size={13} className="animate-spin" /> Uploading…</>
+                        : <><UploadCloud size={13} /> Upload Additional Document</>}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>

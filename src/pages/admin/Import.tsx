@@ -428,6 +428,8 @@ const Import: React.FC = () => {
         applicationFeePaid: booking.applicationFeePaid,
         emergencyContact: booking.emergencyContact,
         emergencyPhone: booking.emergencyPhone,
+        emergencyContactRelationship: '',
+        transportationPurpose: 'School',
         notes: booking.notes,
         mileage: importMileage,
         createdAt: serverTimestamp(),

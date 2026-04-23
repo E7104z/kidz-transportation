@@ -6,9 +6,23 @@ import {
   Text,
   Image,
   StyleSheet,
+  Font,
 } from '@react-pdf/renderer';
 import type { Client, Student, Booking } from '../../types';
+import { calculateAge } from '../../utils/calculateAge';
 import logoSrc from '../../assets/KIDZ logo4 site.png';
+
+// ── Owner / company representative (pre-filled on every contract) ──────
+// Update these values to change the printed company signature.
+const OWNER_NAME  = 'Kara Noland';
+const OWNER_TITLE = 'Owner, KIDZ Transportation Services, LLC';
+
+// Cursive handwriting font for typed signatures. @react-pdf/renderer embeds
+// the TTF into the PDF at render time, so the final document is self-contained.
+Font.register({
+  family: 'Caveat',
+  src: 'https://cdn.jsdelivr.net/fontsource/fonts/caveat@latest/latin-400-normal.ttf',
+});
 
 interface ContractPDFProps {
   data: {
@@ -17,6 +31,11 @@ interface ContractPDFProps {
     booking: Booking;
     generatedDate: string;
     applicationFeePaid: boolean;
+    signature?: {
+      dataUrl: string;        // PNG data URL drawn by the parent
+      signedName: string;     // typed legal name
+      signedDate: string;     // "April 23, 2026"
+    };
   };
 }
 
@@ -131,6 +150,47 @@ const s = StyleSheet.create({
     marginBottom: 4,
     paddingRight: 6,
   },
+  studentBoxCell25: {
+    width: '25%',
+    marginBottom: 4,
+    paddingRight: 6,
+  },
+  studentBoxCell50: {
+    width: '50%',
+    marginBottom: 4,
+    paddingRight: 6,
+  },
+  // ── Medical / Emergency ─────────────────────────────────
+  fullCell: {
+    width: '100%',
+    marginBottom: 6,
+  },
+  warningBanner: {
+    backgroundColor: '#fef3c7',
+    borderLeftWidth: 3,
+    borderLeftColor: '#f59e0b',
+    paddingTop: 6,
+    paddingBottom: 6,
+    paddingLeft: 8,
+    paddingRight: 8,
+    marginBottom: 8,
+  },
+  warningText: {
+    fontSize: 8.5,
+    color: '#92400e',
+    fontFamily: 'Helvetica-Bold',
+  },
+  medicalAlertBox: {
+    backgroundColor: '#fffbeb',
+    borderLeftWidth: 3,
+    borderLeftColor: '#f59e0b',
+    paddingTop: 6,
+    paddingBottom: 6,
+    paddingLeft: 8,
+    paddingRight: 8,
+    marginBottom: 6,
+    width: '100%',
+  },
   // ── Rate Summary ─────────────────────────────────────────
   rateBox: {
     backgroundColor: '#eff6ff',
@@ -207,6 +267,33 @@ const s = StyleSheet.create({
     color: GRAY_TEXT,
     marginTop: 6,
   },
+  signatureImage: {
+    position: 'absolute',
+    left: 0,
+    bottom: 6,
+    height: 28,
+    width: 180,
+    objectFit: 'contain',
+  },
+  signatureTypedName: {
+    fontSize: 8,
+    fontFamily: 'Helvetica-Bold',
+    color: NAVY,
+    marginTop: 2,
+  },
+  ownerSignatureScript: {
+    position: 'absolute',
+    left: 4,
+    bottom: 10,
+    fontSize: 20,
+    fontFamily: 'Caveat',
+    color: NAVY,
+  },
+  ownerSignatureTitle: {
+    fontSize: 7.5,
+    color: GRAY_TEXT,
+    marginTop: 1,
+  },
   // ── Footer (fixed every page) ───────────────────────────
   footer: {
     position: 'absolute',
@@ -230,7 +317,7 @@ const s = StyleSheet.create({
 });
 
 const ContractPDF: React.FC<ContractPDFProps> = ({ data }) => {
-  const { client, students, booking, generatedDate, applicationFeePaid } = data;
+  const { client, students, booking, generatedDate, applicationFeePaid, signature } = data;
 
   const selectedDays = DAYS_ORDER.filter(d => booking.daysOfWeek.includes(d));
 
@@ -314,38 +401,50 @@ const ContractPDF: React.FC<ContractPDFProps> = ({ data }) => {
           </View>
         </View>
 
-        {students.map((student, idx) => (
-          <View key={idx} style={s.studentBox}>
-            <View style={s.studentBoxGrid}>
-              <View style={s.studentBoxCell}>
-                <Text style={s.cellLabel}>Student Name</Text>
-                <Text style={s.cellValue}>{student.name}</Text>
-              </View>
-              <View style={s.studentBoxCell}>
-                <Text style={s.cellLabel}>Date of Birth</Text>
-                <Text style={s.cellValue}>{student.dob}</Text>
-              </View>
-              <View style={s.studentBoxCell}>
-                <Text style={s.cellLabel}>Grade</Text>
-                <Text style={s.cellValue}>{student.grade}</Text>
-              </View>
-              <View style={s.studentBoxCell}>
-                <Text style={s.cellLabel}>School Name</Text>
-                <Text style={s.cellValue}>{student.schoolName}</Text>
-              </View>
-              <View style={s.studentBoxCell}>
-                <Text style={s.cellLabel}>School Contact</Text>
-                <Text style={s.cellValue}>{student.schoolContact || '—'}</Text>
+        {students.map((student, idx) => {
+          const computedAge = calculateAge(student.dob);
+          const ageDisplay = !isNaN(computedAge) ? String(computedAge) : (student.age ? String(student.age) : '—');
+          return (
+            <View key={idx} style={s.studentBox}>
+              <View style={s.studentBoxGrid}>
+                <View style={s.studentBoxCell25}>
+                  <Text style={s.cellLabel}>Student Name</Text>
+                  <Text style={s.cellValue}>{student.name || '—'}</Text>
+                </View>
+                <View style={s.studentBoxCell25}>
+                  <Text style={s.cellLabel}>Date of Birth</Text>
+                  <Text style={s.cellValue}>{student.dob || '—'}</Text>
+                </View>
+                <View style={s.studentBoxCell25}>
+                  <Text style={s.cellLabel}>Age</Text>
+                  <Text style={s.cellValue}>{ageDisplay}</Text>
+                </View>
+                <View style={s.studentBoxCell25}>
+                  <Text style={s.cellLabel}>Grade</Text>
+                  <Text style={s.cellValue}>{student.grade || '—'}</Text>
+                </View>
+                <View style={s.studentBoxCell50}>
+                  <Text style={s.cellLabel}>School Name</Text>
+                  <Text style={s.cellValue}>{student.schoolName || '—'}</Text>
+                </View>
+                <View style={s.studentBoxCell50}>
+                  <Text style={s.cellLabel}>School Contact</Text>
+                  <Text style={s.cellValue}>{student.schoolContact || '—'}</Text>
+                </View>
               </View>
             </View>
-          </View>
-        ))}
+          );
+        })}
 
         {/* ────────────────────────────────────────────────
             Section 2 — SERVICE DETAILS
         ──────────────────────────────────────────────── */}
         <Text style={s.sectionLabel}>SERVICE DETAILS</Text>
         <View style={s.grid2}>
+          <View style={s.gridCell50}>
+            <Text style={s.cellLabel}>Purpose of Transportation</Text>
+            <Text style={s.cellValue}>{booking.transportationPurpose || 'School'}</Text>
+          </View>
           <View style={s.gridCell50}>
             <Text style={s.cellLabel}>Transportation Type</Text>
             <Text style={s.cellValue}>{formatTransportType(booking.transportationType)}</Text>
@@ -375,6 +474,72 @@ const ContractPDF: React.FC<ContractPDFProps> = ({ data }) => {
             <Text style={s.cellValue}>{formatStartDate()}</Text>
           </View>
         </View>
+
+        {/* ────────────────────────────────────────────────
+            Section 2.5 — MEDICAL & EMERGENCY INFORMATION
+        ──────────────────────────────────────────────── */}
+        {(() => {
+          // Aggregate medical info across all students for the contract.
+          const medicalLines = students
+            .map(st => {
+              const parts: string[] = [];
+              if (st.allergies?.trim()) parts.push(st.allergies.trim());
+              if (st.medicalNotes?.trim()) parts.push(st.medicalNotes.trim());
+              return parts.length ? `${st.name || 'Student'}: ${parts.join('; ')}` : '';
+            })
+            .filter(Boolean);
+          const specialLines = students
+            .map(st => (st.specialRequirements?.trim() ? `${st.name || 'Student'}: ${st.specialRequirements.trim()}` : ''))
+            .filter(Boolean);
+          const hasMedical = medicalLines.length > 0;
+          const hasSpecial = specialLines.length > 0;
+          const ecName = booking.emergencyContact?.trim();
+          const ecPhone = booking.emergencyPhone?.trim();
+          const ecRel = booking.emergencyContactRelationship?.trim();
+          const ecMissing = !ecName && !ecPhone;
+
+          return (
+            <>
+              <Text style={s.sectionLabel}>MEDICAL &amp; EMERGENCY INFORMATION</Text>
+              {ecMissing && (
+                <View style={s.warningBanner}>
+                  <Text style={s.warningText}>
+                    ⚠ Emergency contact information not on file. Please update this record.
+                  </Text>
+                </View>
+              )}
+              {hasMedical ? (
+                <View style={s.medicalAlertBox}>
+                  <Text style={s.cellLabel}>Medical Conditions / Allergies</Text>
+                  <Text style={s.cellValue}>{medicalLines.join('  •  ')}</Text>
+                </View>
+              ) : (
+                <View style={s.fullCell}>
+                  <Text style={s.cellLabel}>Medical Conditions / Allergies</Text>
+                  <Text style={s.cellValue}>None reported</Text>
+                </View>
+              )}
+              <View style={s.fullCell}>
+                <Text style={s.cellLabel}>Special Instructions / Requirements</Text>
+                <Text style={s.cellValue}>{hasSpecial ? specialLines.join('  •  ') : 'None'}</Text>
+              </View>
+              <View style={s.grid2}>
+                <View style={[s.gridCell50, { width: '34%' }]}>
+                  <Text style={s.cellLabel}>Emergency Contact Name</Text>
+                  <Text style={s.cellValue}>{ecName || 'Not on file'}</Text>
+                </View>
+                <View style={[s.gridCell50, { width: '34%' }]}>
+                  <Text style={s.cellLabel}>Emergency Contact Phone</Text>
+                  <Text style={s.cellValue}>{ecPhone || 'Not on file'}</Text>
+                </View>
+                <View style={[s.gridCell50, { width: '32%' }]}>
+                  <Text style={s.cellLabel}>Relationship</Text>
+                  <Text style={s.cellValue}>{ecRel || 'Not on file'}</Text>
+                </View>
+              </View>
+            </>
+          );
+        })()}
 
         {/* ────────────────────────────────────────────────
             Section 3 — RATE SUMMARY
@@ -408,6 +573,7 @@ const ContractPDF: React.FC<ContractPDFProps> = ({ data }) => {
             '5. KIDZ Transportation is not responsible for delays caused by traffic, weather, or school schedule changes.',
             '6. This agreement renews weekly unless cancelled in writing by either party.',
             '7. KIDZ Transportation maintains all required state certifications and insurance.',
+            '8. Parent/Guardian is responsible for providing accurate medical information and emergency contacts. KIDZ Transportation must be notified in writing of any changes.',
           ].map((term, i) => (
             <Text key={i} style={s.termItem}>{term}</Text>
           ))}
@@ -419,14 +585,24 @@ const ContractPDF: React.FC<ContractPDFProps> = ({ data }) => {
         <Text style={s.sectionLabel}>SIGNATURES</Text>
         <View style={s.signaturesRow}>
           <View style={s.signatureBox}>
-            <View style={s.signatureLine} />
+            <View style={s.signatureLine}>
+              {signature?.dataUrl && (
+                <Image src={signature.dataUrl} style={s.signatureImage} />
+              )}
+            </View>
             <Text style={s.signatureLabel}>Parent/Guardian Signature</Text>
-            <Text style={s.signatureDate}>Date: ________</Text>
+            {signature?.signedName && (
+              <Text style={s.signatureTypedName}>{signature.signedName}</Text>
+            )}
+            <Text style={s.signatureDate}>Date: {signature?.signedDate || '________'}</Text>
           </View>
           <View style={s.signatureBox}>
-            <View style={s.signatureLine} />
+            <View style={s.signatureLine}>
+              <Text style={s.ownerSignatureScript}>{OWNER_NAME}</Text>
+            </View>
             <Text style={s.signatureLabel}>KIDZ Transportation Representative</Text>
-            <Text style={s.signatureDate}>Date: ________</Text>
+            <Text style={s.ownerSignatureTitle}>{OWNER_TITLE}</Text>
+            <Text style={s.signatureDate}>Date: {generatedDate}</Text>
           </View>
         </View>
 

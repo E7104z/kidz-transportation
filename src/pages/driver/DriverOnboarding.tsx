@@ -317,6 +317,14 @@ const DriverOnboarding: React.FC = () => {
         phone: s1.phone.trim(),
         onboardingStatus: 'complete',
         onboardingCompletedAt: serverTimestamp(),
+        // Mirror documents to the top-level driver doc so the admin panel
+        // can read them without fetching the onboarding subcollection.
+        documents: {
+          driversLicense: uploads.driversLicense!,
+          insurance:      uploads.insurance!,
+          registration:   uploads.registration!,
+          w9:             uploads.w9!,
+        },
       });
 
       setSubmitted(true);

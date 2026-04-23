@@ -1,6 +1,7 @@
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import Apply from './pages/public/Apply';
+import SignContract from './pages/public/SignContract';
 import Login from './pages/auth/Login';
 import Dashboard from './pages/admin/Dashboard';
 import PipelineKanban from './pages/admin/PipelineKanban';
@@ -102,6 +103,7 @@ function App() {
             }
           />
           <Route path="/apply" element={<Apply />} />
+          <Route path="/sign/:contractId" element={<SignContract />} />
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
       </Router>

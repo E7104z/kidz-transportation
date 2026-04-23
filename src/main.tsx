@@ -1,3 +1,9 @@
+// Polyfill Buffer for @react-pdf/renderer in the browser — must run BEFORE
+// any other import so synchronous `Buffer` references resolve.
+import { Buffer as _Buffer } from 'buffer';
+(globalThis as any).Buffer = (globalThis as any).Buffer || _Buffer;
+(globalThis as any).global = globalThis;
+
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import './index.css';

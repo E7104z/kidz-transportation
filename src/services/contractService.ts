@@ -34,7 +34,7 @@ export async function generateAndSaveContract(
   booking: Booking,
   client: Client,
   students: Student[]
-): Promise<{ contractId: string; pdfUrl: string }> {
+): Promise<{ contractId: string; pdfUrl: string; signingToken: string }> {
   const generatedDate = format(new Date(), 'MMMM d, yyyy');
 
   // 1. Render PDF to blob (must stay in browser — react-pdf is browser-only)
@@ -70,7 +70,7 @@ export async function generateAndSaveContract(
   const fns             = getFunctions();
   const saveContractFn  = httpsCallable<
     { bookingId: string; pdfUrl: string; contractData: Record<string, unknown> },
-    { contractId: string }
+    { contractId: string; signingToken: string }
   >(fns, 'saveContractRecord');
 
   const result = await saveContractFn({
@@ -92,7 +92,11 @@ export async function generateAndSaveContract(
     },
   });
 
-  return { contractId: result.data.contractId, pdfUrl };
+  return {
+    contractId: result.data.contractId,
+    pdfUrl,
+    signingToken: result.data.signingToken,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -105,11 +109,60 @@ export async function queueContractEmail(
   toEmail: string,
   toName: string
 ): Promise<void> {
+  const signUrl = contract.signingToken && !contract.signedAt
+    ? `${window.location.origin}/sign/${contract.id}?t=${encodeURIComponent(contract.signingToken)}`
+    : '';
+
+  const signBlock = signUrl
+    ? `
+    <div style="text-align:center;margin:8px 0 28px;">
+      <a href="${signUrl}"
+         style="background:#16a34a;color:#fff;padding:14px 36px;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px;display:inline-block;">
+        ✍ Sign Agreement Online
+      </a>
+      <p style="color:#6b7280;font-size:12px;margin:8px 0 0;">Fastest way to get your child started — takes less than a minute.</p>
+    </div>`
+    : '';
+
   // Write email job
+  const htmlBody = `<!DOCTYPE html>
+<html><body style="font-family:Arial,sans-serif;color:#333;max-width:600px;margin:0 auto;padding:20px;">
+  <div style="background:#6d28d9;padding:24px;border-radius:12px 12px 0 0;text-align:center;">
+    <h1 style="color:#fff;margin:0;font-size:22px;">KIDZ Transportation</h1>
+    <p style="color:#ddd6fe;margin:6px 0 0;font-size:14px;">Transportation Service Agreement</p>
+  </div>
+  <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 12px 12px;padding:32px;">
+    <p style="font-size:16px;font-weight:600;margin:0 0 12px;">Hello ${toName},</p>
+    <p style="color:#4b5563;line-height:1.7;margin:0 0 24px;">
+      Your KIDZ Transportation service agreement for <strong>${contract.studentNames.join(', ')}</strong> is ready for your review.
+      Please read the agreement carefully and keep a copy for your records.
+    </p>
+    ${signBlock}
+    <div style="text-align:center;margin:16px 0;">
+      <a href="${contract.pdfUrl}"
+         style="background:#6d28d9;color:#fff;padding:12px 30px;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px;display:inline-block;">
+        View &amp; Download Agreement
+      </a>
+    </div>
+    <p style="color:#6b7280;font-size:13px;line-height:1.6;margin:16px 0 8px;">
+      If the buttons above don't work, copy and paste these links into your browser:
+    </p>
+    ${signUrl ? `<p style="word-break:break-all;font-size:12px;color:#9ca3af;margin:0 0 6px;"><strong>Sign:</strong> ${signUrl}</p>` : ''}
+    <p style="word-break:break-all;font-size:12px;color:#9ca3af;margin:0 0 24px;"><strong>PDF:</strong> ${contract.pdfUrl}</p>
+    <hr style="border:none;border-top:1px solid #f3f4f6;margin:24px 0;">
+    <p style="color:#6b7280;font-size:13px;margin:0 0 4px;">
+      Questions? Call or text us: <strong>(314) 425-9668</strong>
+    </p>
+    <p style="color:#9ca3af;font-size:12px;margin:0;text-align:center;">
+      KIDZ Transportation &bull; Safe Rides for Little Ones
+    </p>
+  </div>
+</body></html>`;
+
   await addDoc(collection(db, 'emailQueue'), {
     to: toEmail,
-    subject: `KIDZ Transportation Agreement — ${contract.studentNames.join(', ')}`,
-    body: `Hello ${toName}, please find attached your transportation service agreement. Review and contact us with questions. (314) 425-9668`,
+    subject: `Your KIDZ Transportation Agreement — ${contract.studentNames.join(', ')}`,
+    body: htmlBody,
     pdfUrl: contract.pdfUrl,
     contractId: contract.id,
     status: 'pending',

@@ -23,6 +23,7 @@ interface MedicalInfo {
 	specialRequirements: string;
 	emergencyContactName: string;
 	emergencyContactPhone: string;
+	emergencyContactRelationship: string;
 }
 
 interface ApplyFormState {
@@ -74,7 +75,7 @@ const initialState: ApplyFormState = {
 	schoolEndTime: '',
 	serviceStartDate: '',
 	parent: { fullName: '', phone: '', email: '', address: '' },
-	medical: { allergies: '', specialRequirements: '', emergencyContactName: '', emergencyContactPhone: '' },
+	medical: { allergies: '', specialRequirements: '', emergencyContactName: '', emergencyContactPhone: '', emergencyContactRelationship: '' },
 	errors: {},
 	submitError: null,
 	submitting: false,
@@ -249,6 +250,7 @@ const Apply: React.FC = () => {
 			if (!state.medical.emergencyContactName) errors['emergencyContactName'] = 'Required';
 			const edigits = stripDigits(state.medical.emergencyContactPhone || '');
 			if (!edigits || edigits.length < 10) errors['emergencyContactPhone'] = 'Phone must have at least 10 digits';
+			if (!state.medical.emergencyContactRelationship) errors['emergencyContactRelationship'] = 'Required';
 		}
 		return errors;
 	};
@@ -321,7 +323,10 @@ const Apply: React.FC = () => {
 				daysOfWeek: state.daysOfWeek, schoolStartTime: state.schoolStartTime,
 				schoolEndTime: state.schoolEndTime, serviceStartDate: state.serviceStartDate,
 				emergencyContact: state.medical.emergencyContactName,
-				emergencyPhone: state.medical.emergencyContactPhone, purpose: state.purpose,
+				emergencyPhone: state.medical.emergencyContactPhone,
+				emergencyContactRelationship: state.medical.emergencyContactRelationship,
+				transportationPurpose: state.purpose === 'Childcare' ? 'Daycare' : state.purpose === 'Medical' ? 'Other' : (state.purpose || 'School'),
+				purpose: state.purpose,
 				status: 'new', weeklyRate: pricing?.weekly ?? 0, dailyRate: pricing?.daily ?? 0,
 				applicationFeePaid: false, notes: '', createdAt: serverTimestamp(),
 			});
@@ -515,6 +520,10 @@ const Apply: React.FC = () => {
 			<div><label className={labelCls}>Emergency Contact Phone</label>
 				<input className={inputCls} value={state.medical.emergencyContactPhone} onChange={e => dispatch({ type: 'SET_MEDICAL', value: { emergencyContactPhone: e.target.value } })} />
 				{state.errors['emergencyContactPhone'] && <div className={errCls}>{state.errors['emergencyContactPhone']}</div>}
+			</div>
+			<div><label className={labelCls}>Relationship to Student</label>
+				<input className={inputCls} value={state.medical.emergencyContactRelationship} onChange={e => dispatch({ type: 'SET_MEDICAL', value: { emergencyContactRelationship: e.target.value } })} placeholder="e.g. Aunt, Grandparent, Family Friend" />
+				{state.errors['emergencyContactRelationship'] && <div className={errCls}>{state.errors['emergencyContactRelationship']}</div>}
 			</div>
 		</div>
 	);

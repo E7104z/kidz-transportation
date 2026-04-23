@@ -260,7 +260,7 @@ const RouteTrackingCard = (props: RouteTrackingCardProps) => {
         <DriverMapView
           driverLocations={mapDriverLocations}
           dropoffMarker={dropoffMarker}
-          height="240px"
+          height="480px"
         />
       </div>
 

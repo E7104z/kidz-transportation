@@ -4,7 +4,7 @@ import L from 'leaflet';
 import type { DriverLocation } from '../types';
 
 const busIcon = L.divIcon({
-  html: `<div style="width:40px;height:40px;display:flex;align-items:center;justify-content:center;background:#2563eb;border:3px solid #fff;border-radius:50%;box-shadow:0 2px 8px rgba(0,0,0,0.3);font-size:20px;">ðŸš</div>`,
+  html: `<div style="width:40px;height:40px;display:flex;align-items:center;justify-content:center;background:#2563eb;border:3px solid #fff;border-radius:50%;box-shadow:0 2px 8px rgba(0,0,0,0.3);"><svg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 24 24' fill='none' stroke='#fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect x='1' y='3' width='15' height='13' rx='2'/><path d='M16 8h4l3 4v3h-7V8z'/><circle cx='5.5' cy='18.5' r='2.5'/><circle cx='18.5' cy='18.5' r='2.5'/></svg></div>`,
   iconSize: [40, 40],
   iconAnchor: [20, 20],
   popupAnchor: [0, -20],
@@ -12,7 +12,7 @@ const busIcon = L.divIcon({
 });
 
 const pickupIcon = L.divIcon({
-  html: `<div style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:#10b981;border:2px solid #fff;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,0.2);font-size:14px;">ðŸ“</div>`,
+  html: `<div style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:#10b981;border:2px solid #fff;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,0.2);"><svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='#fff'><path d='M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5S10.62 6.5 12 6.5s2.5 1.12 2.5 2.5S13.38 11.5 12 11.5z'/></svg></div>`,
   iconSize: [28, 28],
   iconAnchor: [14, 14],
   popupAnchor: [0, -14],
@@ -20,7 +20,7 @@ const pickupIcon = L.divIcon({
 });
 
 const dropoffIcon = L.divIcon({
-  html: `<div style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:#ef4444;border:2px solid #fff;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,0.2);font-size:14px;">ðŸ«</div>`,
+  html: `<div style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:#ef4444;border:2px solid #fff;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,0.2);"><svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='#fff'><path d='M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5S10.62 6.5 12 6.5s2.5 1.12 2.5 2.5S13.38 11.5 12 11.5z'/></svg></div>`,
   iconSize: [28, 28],
   iconAnchor: [14, 14],
   popupAnchor: [0, -14],
@@ -62,7 +62,7 @@ interface DriverMapViewProps {
 const DriverMapView: React.FC<DriverMapViewProps> = ({
   driverLocations,
   markers = [],
-  height = '320px',
+  height = '640px',
   dropoffMarker,
 }) => {
   // Determine map center â€” use first driver position, or dropoff, or first marker, or St. Louis default

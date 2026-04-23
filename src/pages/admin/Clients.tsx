@@ -35,9 +35,9 @@ import toast from 'react-hot-toast';
 import { db } from '../../services/firebase';
 import { computeWeeklyCharge } from '../../utils/pricing';
 import { getMileage } from '../../services/mileageService';
-import { generateAndSaveContract, queueContractEmail, fetchContract } from '../../services/contractService';
+import { generateAndSaveContract, queueContractEmail } from '../../services/contractService';
 import AddressAutocomplete from '../../components/AddressAutocomplete';
-import type { Client, Student, Booking, Contract, ClientAccess, ContactRole, ContactPermissions } from '../../types';
+import type { Client, Student, Booking, Contract, ClientAccess, ContactRole, ContactPermissions, TransportationPurpose } from '../../types';
 import { DEFAULT_PERMISSIONS } from '../../types';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 
@@ -64,15 +64,26 @@ const TRANSPORT_OPTIONS = [
   { value: 'pm_only', label: 'PM Only' },
   { value: 'midday', label: 'Midday' },
 ];
+const PURPOSE_OPTIONS: TransportationPurpose[] = ['School', 'Daycare', 'Afterschool', 'Summer Program', 'Other'];
 
 const inputCls = 'w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 transition';
 const labelCls = 'block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1';
 
+/** Convert a Firestore Timestamp, Date, or ISO string to a YYYY-MM-DD string for <input type="date"> */
+const toDateStr = (raw: any): string => {
+  if (!raw) return '';
+  if (typeof raw?.toDate === 'function') return raw.toDate().toISOString().split('T')[0];
+  if (raw instanceof Date) return raw.toISOString().split('T')[0];
+  if (typeof raw === 'string') return raw.substring(0, 10);
+  return '';
+};
+
 interface StudentDraft {
   name: string; dob: string; grade: string; schoolName: string;
   schoolContact: string; allergies: string; medicalNotes: string;
+  specialRequirements: string;
 }
-const blankStudent = (): StudentDraft => ({ name: '', dob: '', grade: '', schoolName: '', schoolContact: '', allergies: '', medicalNotes: '' });
+const blankStudent = (): StudentDraft => ({ name: '', dob: '', grade: '', schoolName: '', schoolContact: '', allergies: '', medicalNotes: '', specialRequirements: '' });
 
 interface AddClientModalProps { onClose: () => void; }
 
@@ -83,6 +94,8 @@ const AddClientModal: React.FC<AddClientModalProps> = ({ onClose }) => {
   const [homeAddress, setHomeAddress] = useState('');
   const [emergencyContact, setEmergencyContact] = useState('');
   const [emergencyPhone, setEmergencyPhone] = useState('');
+  const [emergencyContactRelationship, setEmergencyContactRelationship] = useState('');
+  const [transportationPurpose, setTransportationPurpose] = useState<TransportationPurpose>('School');
   const [pickupAddress, setPickupAddress] = useState('');
   const [dropoffAddress, setDropoffAddress] = useState('');
   const [transportationType, setTransportationType] = useState('roundtrip');
@@ -112,6 +125,10 @@ const AddClientModal: React.FC<AddClientModalProps> = ({ onClose }) => {
   const handleSubmit = async () => {
     if (!parentName.trim() || !email.trim()) { toast.error('Parent name and email are required'); return; }
     if (students.some(s => !s.name.trim())) { toast.error('Each student must have a name'); return; }
+    if (!emergencyContact.trim() || !emergencyPhone.trim() || !emergencyContactRelationship.trim()) {
+      toast.error('Emergency contact name, phone, and relationship are required'); return;
+    }
+    if (!transportationPurpose) { toast.error('Transportation purpose is required'); return; }
     setSubmitting(true);
     try {
       const trimmedEmail = email.trim().toLowerCase();
@@ -132,18 +149,21 @@ const AddClientModal: React.FC<AddClientModalProps> = ({ onClose }) => {
         const sRef = await addDoc(collection(db, 'students'), {
           clientId, name: s.name.trim(), dob: s.dob, age: 0, grade: s.grade,
           schoolName: s.schoolName, schoolContact: s.schoolContact, allergies: s.allergies,
-          medicalNotes: s.medicalNotes, specialRequirements: '', phone: '',
+          medicalNotes: s.medicalNotes, specialRequirements: s.specialRequirements, phone: '',
         });
         studentIds.push(sRef.id);
       }
       await addDoc(collection(db, 'bookings'), {
         clientId, studentIds, pickupAddress: pickupAddress.trim(),
         dropoffAddress: dropoffAddress.trim(), transportationType, daysOfWeek,
+        transportationPurpose,
         schoolStartTime, schoolEndTime,
         serviceStartDate: serviceStartDate ? new Date(serviceStartDate) : null,
         mileage, weeklyRate: pricing.weekly, dailyRate: pricing.daily, status: 'new',
         applicationFeePaid: false, emergencyContact: emergencyContact.trim(),
-        emergencyPhone: emergencyPhone.trim(), notes: '',
+        emergencyPhone: emergencyPhone.trim(),
+        emergencyContactRelationship: emergencyContactRelationship.trim(),
+        notes: '',
         createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
       });
 
@@ -174,8 +194,10 @@ const AddClientModal: React.FC<AddClientModalProps> = ({ onClose }) => {
               <div className="col-span-2 sm:col-span-1"><label className={labelCls}>Email *</label><input className={inputCls} type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="jane@email.com" /></div>
               <div><label className={labelCls}>Phone</label><input className={inputCls} type="tel" value={phone} onChange={e => setPhone(e.target.value)} placeholder="(314) 000-0000" /></div>
               <div><label className={labelCls}>Home Address</label><AddressAutocomplete value={homeAddress} onChange={setHomeAddress} placeholder="Start typing..." className={inputCls} /></div>
-              <div><label className={labelCls}>Emergency Contact</label><input className={inputCls} value={emergencyContact} onChange={e => setEmergencyContact(e.target.value)} /></div>
-              <div><label className={labelCls}>Emergency Phone</label><input className={inputCls} type="tel" value={emergencyPhone} onChange={e => setEmergencyPhone(e.target.value)} /></div>
+              <div><label className={labelCls}>Emergency Contact *</label><input className={inputCls} value={emergencyContact} onChange={e => setEmergencyContact(e.target.value)} /></div>
+              <div><label className={labelCls}>Emergency Phone *</label><input className={inputCls} type="tel" value={emergencyPhone} onChange={e => setEmergencyPhone(e.target.value)} /></div>
+              <div><label className={labelCls}>Relationship to Student *</label><input className={inputCls} value={emergencyContactRelationship} onChange={e => setEmergencyContactRelationship(e.target.value)} placeholder="e.g. Aunt, Grandparent" /></div>
+              <div><label className={labelCls}>Purpose of Transportation *</label><select className={inputCls} value={transportationPurpose} onChange={e => setTransportationPurpose(e.target.value as TransportationPurpose)}>{PURPOSE_OPTIONS.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
             </div>
           </section>
           <section>
@@ -197,6 +219,8 @@ const AddClientModal: React.FC<AddClientModalProps> = ({ onClose }) => {
                     <div><label className={labelCls}>School Name</label><input className={inputCls} value={s.schoolName} onChange={e => updateStudent(i, 'schoolName', e.target.value)} /></div>
                     <div><label className={labelCls}>School Contact</label><input className={inputCls} value={s.schoolContact} onChange={e => updateStudent(i, 'schoolContact', e.target.value)} /></div>
                     <div><label className={labelCls}>Allergies</label><input className={inputCls} value={s.allergies} onChange={e => updateStudent(i, 'allergies', e.target.value)} /></div>
+                    <div className="col-span-2"><label className={labelCls}>Medical Conditions / Notes</label><textarea className={inputCls} rows={2} value={s.medicalNotes} onChange={e => updateStudent(i, 'medicalNotes', e.target.value)} placeholder="Asthma, EpiPen, daily medication, etc." /></div>
+                    <div className="col-span-2"><label className={labelCls}>Special Requirements / Instructions</label><textarea className={inputCls} rows={2} value={s.specialRequirements} onChange={e => updateStudent(i, 'specialRequirements', e.target.value)} placeholder="Booster seat, wheelchair, behavioral notes, etc." /></div>
                   </div>
                 </div>
               ))}
@@ -273,6 +297,9 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [sendingInvite, setSendingInvite] = useState(false);
+  const [togglingFee, setTogglingFee] = useState(false);
+  const [savingStartDate, setSavingStartDate] = useState(false);
+  const [sendingEmail, setSendingEmail] = useState(false);
 
   useEffect(() => {
     const q = query(collection(db, 'contracts'), where('clientId', '==', client.id), orderBy('generatedAt', 'desc'));
@@ -307,7 +334,7 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
     if (!newStudent.name.trim()) { toast.error('Student name required'); return; }
     setSavingNewStudent(true);
     try {
-      await addDoc(collection(db, 'students'), { clientId: client.id, name: newStudent.name.trim(), dob: newStudent.dob, grade: newStudent.grade, schoolName: newStudent.schoolName, schoolContact: newStudent.schoolContact, allergies: newStudent.allergies, medicalNotes: newStudent.medicalNotes, age: 0, phone: '', specialRequirements: '' });
+      await addDoc(collection(db, 'students'), { clientId: client.id, name: newStudent.name.trim(), dob: newStudent.dob, grade: newStudent.grade, schoolName: newStudent.schoolName, schoolContact: newStudent.schoolContact, allergies: newStudent.allergies, medicalNotes: newStudent.medicalNotes, age: 0, phone: '', specialRequirements: newStudent.specialRequirements });
       toast.success('Student added'); setAddingStudent(false); setNewStudent(blankStudent());
     } catch { toast.error('Failed to add student'); } finally { setSavingNewStudent(false); }
   };
@@ -373,13 +400,10 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
 
   const handleGenerateContract = async () => {
     if (!booking) { toast.error('No booking found for this client'); return; }
-    if (!booking.applicationFeePaid) { toast.error('Application fee must be paid first'); return; }
     setGeneratingContract(true);
     try {
-      const { contractId } = await generateAndSaveContract(booking, client, students);
-      const freshContract = await fetchContract(contractId);
-      if (freshContract) await queueContractEmail(freshContract, client.email, client.name);
-      toast.success('Contract generated and queued for delivery \u2713');
+      await generateAndSaveContract(booking, client, students);
+      toast.success('Contract generated ✓  —  use "Email to Parent" to send it');
     } catch (err: any) {
       toast.error(err?.message ?? 'Failed to generate contract');
     } finally { setGeneratingContract(false); }
@@ -400,6 +424,26 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
     } catch (err: any) {
       toast.error(err?.message ?? 'Failed to send invite');
     } finally { setSendingInvite(false); }
+  };
+
+  const toggleApplicationFee = async () => {
+    if (!booking) return;
+    setTogglingFee(true);
+    try {
+      await updateDoc(doc(db, 'bookings', booking.id), { applicationFeePaid: !booking.applicationFeePaid });
+      toast.success(booking.applicationFeePaid ? 'Marked as unpaid' : 'Application fee marked as paid ✓');
+    } catch { toast.error('Failed to update fee status'); } finally { setTogglingFee(false); }
+  };
+
+  const handleSendEmail = async () => {
+    if (!latestContract) return;
+    setSendingEmail(true);
+    try {
+      await queueContractEmail(latestContract, client.email, client.name);
+      toast.success('Contract email queued for delivery ✓');
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Failed to queue email');
+    } finally { setSendingEmail(false); }
   };
 
   const formatTs = (ts: any) => {
@@ -541,8 +585,8 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
                       </div>
                       {editingStudentId === s.id ? (
                         <div className="grid grid-cols-2 gap-2">
-                          {(['name', 'dob', 'grade', 'schoolName', 'schoolContact', 'allergies', 'medicalNotes'] as (keyof Student)[]).map(k => (
-                            <div key={k as string}><label className={labelCls}>{(k as string).replace(/([A-Z])/g, ' $1').trim()}</label><input className={inputCls} value={(studentForm[k] as string) ?? ''} onChange={e => setStudentForm(f => ({ ...f, [k]: e.target.value }))} /></div>
+                          {(['name', 'dob', 'grade', 'schoolName', 'schoolContact', 'allergies', 'medicalNotes', 'specialRequirements'] as (keyof Student)[]).map(k => (
+                            <div key={k as string} className={k === 'medicalNotes' || k === 'specialRequirements' ? 'col-span-2' : ''}><label className={labelCls}>{(k as string).replace(/([A-Z])/g, ' $1').trim()}</label><input className={inputCls} value={(studentForm[k] as string) ?? ''} onChange={e => setStudentForm(f => ({ ...f, [k]: e.target.value }))} /></div>
                           ))}
                         </div>
                       ) : (
@@ -603,15 +647,21 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
                           <div className="col-span-2"><label className={labelCls}>Pickup Address</label><AddressAutocomplete value={bookingForm.pickupAddress ?? ''} onChange={v => setBookingForm(f => ({ ...f, pickupAddress: v }))} onSelect={v => { if (bookingForm.dropoffAddress) tryFetchMileage(v, bookingForm.dropoffAddress); }} className={inputCls} /></div>
                           <div className="col-span-2"><label className={labelCls}>Dropoff Address</label><AddressAutocomplete value={bookingForm.dropoffAddress ?? ''} onChange={v => setBookingForm(f => ({ ...f, dropoffAddress: v }))} onSelect={v => { if (bookingForm.pickupAddress) tryFetchMileage(bookingForm.pickupAddress, v); }} className={inputCls} /></div>
                           <div><label className={labelCls}>Transport Type</label><select className={inputCls} value={bookingForm.transportationType} onChange={e => setBookingForm(f => ({ ...f, transportationType: e.target.value as any }))}>{TRANSPORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select></div>
+                          <div><label className={labelCls}>Purpose of Transportation</label><select className={inputCls} value={bookingForm.transportationPurpose ?? 'School'} onChange={e => setBookingForm(f => ({ ...f, transportationPurpose: e.target.value as TransportationPurpose }))}>{PURPOSE_OPTIONS.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
                           <div><label className={labelCls}>Mileage {fetchingMileage && <span className="text-violet-400">(fetching...)</span>}</label><input type="number" step="0.1" className={inputCls} value={bookingForm.mileage ?? 0} onChange={e => setBookingForm(f => ({ ...f, mileage: Number(e.target.value) }))} /></div>
                           <div><label className={labelCls}>School Start</label><input type="time" className={inputCls} value={bookingForm.schoolStartTime ?? ''} onChange={e => setBookingForm(f => ({ ...f, schoolStartTime: e.target.value }))} /></div>
                           <div><label className={labelCls}>School End</label><input type="time" className={inputCls} value={bookingForm.schoolEndTime ?? ''} onChange={e => setBookingForm(f => ({ ...f, schoolEndTime: e.target.value }))} /></div>
+                          <div><label className={labelCls}>Service Start Date</label><input type="date" className={inputCls} value={toDateStr(bookingForm.serviceStartDate)} onChange={e => setBookingForm(f => ({ ...f, serviceStartDate: e.target.value ? new Date(e.target.value + 'T12:00:00') : undefined as any }))} /></div>
+                          <div className="flex items-center gap-2 pt-6"><input type="checkbox" id="bfAppFee" checked={bookingForm.applicationFeePaid ?? false} onChange={e => setBookingForm(f => ({ ...f, applicationFeePaid: e.target.checked }))} className="w-4 h-4 accent-violet-600 cursor-pointer" /><label htmlFor="bfAppFee" className="text-sm text-slate-700 cursor-pointer">Application fee paid ($40)</label></div>
+                          <div><label className={labelCls}>Emergency Contact Name</label><input className={inputCls} value={bookingForm.emergencyContact ?? ''} onChange={e => setBookingForm(f => ({ ...f, emergencyContact: e.target.value }))} /></div>
+                          <div><label className={labelCls}>Emergency Phone</label><input className={inputCls} type="tel" value={bookingForm.emergencyPhone ?? ''} onChange={e => setBookingForm(f => ({ ...f, emergencyPhone: e.target.value }))} /></div>
+                          <div className="col-span-2"><label className={labelCls}>Relationship to Student</label><input className={inputCls} value={bookingForm.emergencyContactRelationship ?? ''} onChange={e => setBookingForm(f => ({ ...f, emergencyContactRelationship: e.target.value }))} placeholder="e.g. Aunt, Grandparent" /></div>
                           <div className="col-span-2"><label className={labelCls}>Days of Service</label><div className="flex flex-wrap gap-2">{DAYS.map(d => (<button key={d} type="button" onClick={() => setBookingForm(f => ({ ...f, daysOfWeek: f.daysOfWeek?.includes(d) ? f.daysOfWeek.filter(x => x !== d) : [...(f.daysOfWeek ?? []), d] }))} className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${(bookingForm.daysOfWeek ?? []).includes(d) ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-slate-600 border-slate-200 hover:border-violet-300'}`}>{d.slice(0, 3)}</button>))}</div></div>
                         </>
                       ) : (
                         <>
-                          {([['Pickup', booking.pickupAddress], ['Dropoff', booking.dropoffAddress], ['Type', booking.transportationType?.replace(/_/g, ' ')], ['Days', booking.daysOfWeek?.join(', ')], ['Start Time', booking.schoolStartTime], ['End Time', booking.schoolEndTime]] as [string, string][]).map(([l, v]) => (
-                            <div key={l}><div className="text-xs text-slate-400 mb-0.5">{l}</div><div className="text-sm font-medium text-slate-800">{v || '---'}</div></div>
+                          {([['Pickup', booking.pickupAddress], ['Dropoff', booking.dropoffAddress], ['Type', booking.transportationType?.replace(/_/g, ' ')], ['Purpose', booking.transportationPurpose ?? 'School'], ['Days', booking.daysOfWeek?.join(', ')], ['Start Time', booking.schoolStartTime], ['End Time', booking.schoolEndTime], ['Service Start', toDateStr(booking.serviceStartDate)], ['App Fee', booking.applicationFeePaid ? 'Paid ✓' : 'Not paid'], ['Emergency Contact', booking.emergencyContact || '—'], ['Emergency Phone', booking.emergencyPhone || '—'], ['Relationship', booking.emergencyContactRelationship || '—']] as [string, string][]).map(([l, v]) => (
+                            <div key={l}><div className="text-xs text-slate-400 mb-0.5">{l}</div><div className={`text-sm font-medium ${l === 'App Fee' && !booking.applicationFeePaid ? 'text-amber-600' : 'text-slate-800'}`}>{v || '---'}</div></div>
                           ))}
                         </>
                       )}
@@ -631,33 +681,161 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
 
           {activeTab === 'contract' && (
             <div className="space-y-4">
-              <div className="flex items-center gap-2">
-                {latestContract ? (
-                  <span className="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium bg-green-100 text-green-700">Generated</span>
-                ) : (
-                  <span className="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium bg-gray-100 text-gray-500">Not Generated</span>
-                )}
-                {latestContract && <span className="text-xs text-slate-400">{formatTs(latestContract.generatedAt)}</span>}
+
+              {/* ── Pre-flight checklist ─────────────────────────────── */}
+              <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+                <div className="px-4 py-3 bg-slate-50 border-b border-slate-200">
+                  <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">Pre-flight Checklist</span>
+                </div>
+                <div className="divide-y divide-slate-100">
+                  {/* 1. Booking on file */}
+                  <div className="flex items-center justify-between px-4 py-3">
+                    <div className="flex items-center gap-2.5">
+                      <span className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${booking ? 'bg-green-100' : 'bg-red-100'}`}>
+                        {booking ? <Check size={11} className="text-green-600" /> : <X size={11} className="text-red-500" />}
+                      </span>
+                      <span className="text-sm text-slate-700">Booking on file</span>
+                    </div>
+                    {!booking && <span className="text-xs text-red-500">Create a booking first</span>}
+                  </div>
+                  {/* 2. Addresses */}
+                  <div className="flex items-center justify-between px-4 py-3">
+                    <div className="flex items-center gap-2.5">
+                      <span className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${booking?.pickupAddress && booking?.dropoffAddress ? 'bg-green-100' : 'bg-amber-100'}`}>
+                        {booking?.pickupAddress && booking?.dropoffAddress ? <Check size={11} className="text-green-600" /> : <X size={11} className="text-amber-500" />}
+                      </span>
+                      <span className="text-sm text-slate-700">Pickup &amp; dropoff addresses</span>
+                    </div>
+                    {!(booking?.pickupAddress && booking?.dropoffAddress) && <span className="text-xs text-amber-600">Set in Booking tab</span>}
+                  </div>
+                  {/* 3. Service start date */}
+                  <div className="flex items-center justify-between px-4 py-3">
+                    <div className="flex items-center gap-2.5">
+                      <span className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${booking?.serviceStartDate ? 'bg-green-100' : 'bg-amber-100'}`}>
+                        {booking?.serviceStartDate ? <Check size={11} className="text-green-600" /> : <X size={11} className="text-amber-500" />}
+                      </span>
+                      <span className="text-sm text-slate-700">Service start date</span>
+                      {booking?.serviceStartDate && <span className="text-xs text-slate-400 ml-1">{toDateStr(booking.serviceStartDate)}</span>}
+                    </div>
+                    {booking && (
+                      <input
+                        type="date"
+                        disabled={savingStartDate}
+                        value={toDateStr(booking.serviceStartDate)}
+                        className="text-xs border border-slate-200 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-violet-400 disabled:opacity-50"
+                        onChange={async e => {
+                          if (!e.target.value) return;
+                          setSavingStartDate(true);
+                          try {
+                            await updateDoc(doc(db, 'bookings', booking.id), { serviceStartDate: new Date(e.target.value + 'T12:00:00') });
+                            toast.success('Service start date saved');
+                          } catch { toast.error('Failed to save date'); } finally { setSavingStartDate(false); }
+                        }}
+                      />
+                    )}
+                  </div>
+                  {/* 4. Application fee */}
+                  <div className="flex items-center justify-between px-4 py-3">
+                    <div className="flex items-center gap-2.5">
+                      <span className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${booking?.applicationFeePaid ? 'bg-green-100' : 'bg-amber-100'}`}>
+                        {booking?.applicationFeePaid ? <Check size={11} className="text-green-600" /> : <X size={11} className="text-amber-500" />}
+                      </span>
+                      <span className="text-sm text-slate-700">Application fee ($40)</span>
+                    </div>
+                    {booking && (
+                      <button
+                        onClick={toggleApplicationFee}
+                        disabled={togglingFee}
+                        className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50 ${booking.applicationFeePaid ? 'bg-green-100 text-green-700 hover:bg-red-100 hover:text-red-600' : 'bg-amber-100 text-amber-700 hover:bg-green-100 hover:text-green-700'}`}
+                      >
+                        {togglingFee ? '…' : booking.applicationFeePaid ? 'Mark Unpaid' : 'Mark as Paid'}
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
+
+              {/* ── Generate button ───────────────────────────────────── */}
+              {(() => {
+                const allReady = !!booking && !!(booking.pickupAddress && booking.dropoffAddress) && !!booking.serviceStartDate && !!booking.applicationFeePaid;
+                return (
+                  <button
+                    disabled={!allReady || generatingContract}
+                    onClick={handleGenerateContract}
+                    className={`w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors ${allReady && !generatingContract ? 'bg-amber-500 hover:bg-amber-600 text-white' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}
+                  >
+                    {generatingContract ? <><Loader2 size={14} className="animate-spin" /> Generating…</> : latestContract ? <><RefreshCw size={14} /> Re-generate Contract</> : 'Generate Contract'}
+                  </button>
+                );
+              })()}
+
+              {/* ── Latest contract card ──────────────────────────────── */}
               {latestContract && (
-                <div className="flex flex-col gap-1">
-                  <a href={latestContract.pdfUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-sm text-violet-600 hover:underline font-medium">Download Latest PDF <ExternalLink size={12} /></a>
-                  {latestContract.sentAt && <span className="text-xs text-slate-400">Emailed on {formatTs(latestContract.sentAt)}</span>}
+                <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+                  <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">Latest Contract</span>
+                    {latestContract.signedAt ? (
+                      <span className="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium bg-emerald-100 text-emerald-700">
+                        <Check size={11} /> Signed
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium bg-green-100 text-green-700">Generated</span>
+                    )}
+                  </div>
+                  <div className="p-4 space-y-3">
+                    <div className="text-xs text-slate-400">Generated {formatTs(latestContract.generatedAt)}</div>
+                    {latestContract.signedAt && (
+                      <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2 text-xs text-emerald-800">
+                        <div className="font-semibold">Signed by {latestContract.signedByName || 'parent'}</div>
+                        <div className="text-emerald-700">{formatTs(latestContract.signedAt)}</div>
+                      </div>
+                    )}
+                    <a href={latestContract.signedPdfUrl || latestContract.pdfUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-sm text-violet-600 hover:underline font-medium">
+                      {latestContract.signedAt ? 'Download Signed PDF' : 'Download PDF'} <ExternalLink size={12} />
+                    </a>
+                    {!latestContract.signedAt && latestContract.signingToken && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const url = `${window.location.origin}/sign/${latestContract.id}?t=${encodeURIComponent(latestContract.signingToken as string)}`;
+                          navigator.clipboard.writeText(url).then(
+                            () => toast.success('Signing link copied'),
+                            () => toast.error('Unable to copy — please select manually')
+                          );
+                        }}
+                        className="inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-violet-600 font-medium"
+                      >
+                        Copy signing link
+                      </button>
+                    )}
+                    <div className="pt-2 border-t border-slate-100">
+                      {latestContract.sentAt ? (
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs text-green-600">Emailed {formatTs(latestContract.sentAt)}</span>
+                          <button onClick={handleSendEmail} disabled={sendingEmail} className="inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-violet-600 font-medium disabled:opacity-50">
+                            {sendingEmail ? <Loader2 size={11} className="animate-spin" /> : <Mail size={11} />} Resend
+                          </button>
+                        </div>
+                      ) : (
+                        <button onClick={handleSendEmail} disabled={sendingEmail} className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold transition-colors ${!sendingEmail ? 'bg-violet-600 hover:bg-violet-700 text-white' : 'bg-slate-200 text-slate-400'}`}>
+                          {sendingEmail ? <Loader2 size={13} className="animate-spin" /> : <Mail size={13} />}
+                          {sendingEmail ? 'Sending…' : `Email to ${client.name.split(' ')[0]}`}
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 </div>
               )}
-              <div title={!booking?.applicationFeePaid ? 'Application fee must be paid first' : undefined}>
-                <button disabled={!booking?.applicationFeePaid || generatingContract} onClick={handleGenerateContract} className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${booking?.applicationFeePaid && !generatingContract ? 'bg-amber-500 hover:bg-amber-600 text-white' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}>
-                  {generatingContract ? <><Loader2 size={14} className="animate-spin" /> Generating...</> : latestContract ? 'Re-generate Contract' : 'Generate Contract'}
-                </button>
-              </div>
-              {contracts.length > 0 && (
-                <div className="mt-2">
-                  <div className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">History</div>
+
+              {/* ── Contract history ──────────────────────────────────── */}
+              {contracts.length > 1 && (
+                <div>
+                  <div className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Previous Versions</div>
                   <div className="space-y-2">
-                    {contracts.map((c, i) => (
+                    {contracts.slice(1).map((c, i) => (
                       <div key={c.id} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2.5">
                         <div>
-                          <div className="text-xs font-medium text-slate-700">{i === 0 ? 'Latest' : `Version ${contracts.length - i}`}</div>
+                          <div className="text-xs font-medium text-slate-700">Version {contracts.length - 1 - i}</div>
                           <div className="text-xs text-slate-400">{formatTs(c.generatedAt)}</div>
                           {c.sentAt && <div className="text-xs text-green-600">Emailed {formatTs(c.sentAt)}</div>}
                         </div>
