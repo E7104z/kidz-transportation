@@ -29,10 +29,15 @@ export interface Student {
   allergies: string;
   medicalNotes: string;
   specialRequirements: string;
+  // Extended fields
+  nickname?: string;
+  requiresChildSeat?: boolean;
+  childSeatType?: 'infant' | 'convertible' | 'booster';
+  medicalAlerts?: string[];
 }
 
 export type TransportationType = 'roundtrip' | 'am_only' | 'pm_only' | 'midday';
-export type BookingStatus = 'new' | 'under_review' | 'contract_sent' | 'active' | 'paused' | 'completed';
+export type BookingStatus = 'new' | 'under_review' | 'dry_run' | 'meet_and_greet' | 'contract_sent' | 'active' | 'paused' | 'completed';
 export type TransportationPurpose = 'School' | 'Daycare' | 'Afterschool' | 'Summer Program' | 'Other';
 
 export interface Booking {
@@ -58,6 +63,18 @@ export interface Booking {
   notes: string;
   createdAt: Date;
   updatedAt: Date;
+  // Extended fields
+  dryRunAt?: Date;
+  meetAndGreetAt?: Date;
+  meetAndGreetCompleted?: boolean;
+  pausedAt?: Date;
+  resumeDate?: Date;
+  pauseReason?: string;
+  billingCadence?: 'weekly' | 'biweekly';
+  scheduleOverrides?: Partial<Record<'monday' | 'tuesday' | 'wednesday' | 'thursday' | 'friday' | 'saturday' | 'sunday', { start?: string; end?: string }>>;
+  rateOverrideReason?: string;
+  rateOverrideBy?: string;
+  rateOverrideAt?: Date;
 }
 
 export interface DriverDocument {
@@ -67,6 +84,10 @@ export interface DriverDocument {
   path: string;       // storage path (for reference)
   uploadedAt: number; // epoch ms
   uploadedBy?: 'driver' | 'admin';
+  expiresAt?: number;          // epoch ms — undefined means never expires
+  reminderSentAt30?: number;
+  reminderSentAt14?: number;
+  reminderSentAt3?: number;
 }
 
 export interface Driver {
@@ -76,14 +97,26 @@ export interface Driver {
   phone: string;
   uid: string;
   photoURL?: string;
+  // Driver type / payroll model
+  driverType?: 'employee' | 'contractor' | 'subcontractor_company';
+  companyName?: string;
+  negotiatedFlatRate?: number;
+  // Stripe Connect
+  stripeConnectAccountId?: string;
+  stripeConnectOnboarded?: boolean;
+  stripeConnectPayoutsEnabled?: boolean;
   // Required onboarding documents
   documents?: {
     driversLicense?: DriverDocument;
     insurance?: DriverDocument;
     registration?: DriverDocument;
     w9?: DriverDocument;
+    backgroundCheck?: DriverDocument;
+    cpr?: DriverDocument;
+    childPassengerSafety?: DriverDocument;
+    vehicleInspection?: DriverDocument;
   };
-  // Flexible bucket for any future document types (background checks, etc.)
+  // Flexible bucket for any future document types
   additionalDocuments?: DriverDocument[];
 }
 
@@ -266,4 +299,179 @@ export interface ClientAccess {
   invitedAt: Timestamp;
   acceptedAt: Timestamp | null;
   createdAt: Timestamp;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// In-app notifications (replacing SMS)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type NotificationType =
+  | 'driver_en_route'
+  | 'driver_nearby'
+  | 'student_picked_up'
+  | 'student_dropped_off'
+  | 'route_missed'
+  | 'route_delayed'
+  | 'invoice_sent'
+  | 'invoice_overdue'
+  | 'invoice_paid'
+  | 'contract_ready_to_sign'
+  | 'incident_reported'
+  | 'document_expiring'
+  | 'admin_broadcast';
+
+export type NotificationAudience = 'parent' | 'driver' | 'admin';
+
+export interface AppNotification {
+  id: string;
+  recipientUid: string;
+  audience: NotificationAudience;
+  type: NotificationType;
+  title: string;
+  body: string;
+  linkTo?: string;
+  bookingId?: string;
+  studentId?: string;
+  driverId?: string;
+  clientId?: string;
+  invoiceId?: string;
+  incidentId?: string;
+  read: boolean;
+  readAt?: Timestamp;
+  createdAt: Timestamp;
+  priority: 'low' | 'normal' | 'high';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Driver shift / break tracking
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type ShiftStatus = 'clocked_in' | 'on_break' | 'clocked_out';
+
+export interface DriverShift {
+  id: string;
+  driverId: string;
+  clockInAt: Timestamp;
+  clockOutAt?: Timestamp;
+  status: ShiftStatus;
+  totalBreakMinutes: number;
+  totalDrivingMinutes: number;
+  notes?: string;
+  hoursOfServiceWarning?: 'approaching_limit' | 'at_limit' | null;
+}
+
+export interface DriverBreak {
+  id: string;
+  shiftId: string;
+  driverId: string;
+  startedAt: Timestamp;
+  endedAt?: Timestamp;
+  durationMinutes?: number;
+  reason?: 'meal' | 'rest' | 'fuel' | 'other';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Incident reporting
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type IncidentType =
+  | 'vehicle_accident'
+  | 'vehicle_breakdown'
+  | 'child_behavior'
+  | 'medical_event'
+  | 'parent_no_show'
+  | 'school_issue'
+  | 'traffic_delay'
+  | 'other';
+
+export type IncidentSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+export interface Incident {
+  id: string;
+  reportedByUid: string;
+  reportedByName: string;
+  reportedByRole: 'driver' | 'admin';
+  driverId?: string;
+  bookingId?: string;
+  studentId?: string;
+  clientId?: string;
+  type: IncidentType;
+  severity: IncidentSeverity;
+  title: string;
+  description: string;
+  location?: { lat: number; lng: number; address?: string };
+  photos: string[];
+  witnesses?: { name: string; phone?: string }[];
+  status: 'open' | 'under_review' | 'resolved' | 'closed';
+  resolutionNotes?: string;
+  resolvedAt?: Timestamp;
+  resolvedByUid?: string;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Client communications log
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type CommunicationChannel = 'email' | 'in_app' | 'phone' | 'admin_note' | 'sms_legacy';
+export type CommunicationDirection = 'inbound' | 'outbound' | 'internal';
+
+export interface ClientCommunication {
+  id: string;
+  clientId: string;
+  channel: CommunicationChannel;
+  direction: CommunicationDirection;
+  subject?: string;
+  body: string;
+  actorUid?: string;
+  actorName?: string;
+  relatedBookingId?: string;
+  relatedInvoiceId?: string;
+  relatedContractId?: string;
+  attachments?: { name: string; url: string }[];
+  createdAt: Timestamp;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stripe webhook idempotency
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ProcessedStripeEvent {
+  id: string;
+  type: string;
+  processedAt: Timestamp;
+  result: 'success' | 'skipped' | 'error' | 'pending';
+  errorMessage?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Offline queue for driver dashboard
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface PendingDriverAction {
+  id: string;
+  driverId: string;
+  type: 'student_event' | 'route_complete' | 'route_missed' | 'route_notes' | 'gps_ping';
+  payload: Record<string, unknown>;
+  createdAt: number;
+  attempts: number;
+  lastError?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Driver payouts
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface DriverPayout {
+  id: string;
+  driverId: string;
+  amountCents: number;
+  transferId: string;
+  description?: string;
+  periodStart: string;
+  periodEnd: string;
+  status: 'sent' | 'failed';
+  createdAt: Timestamp;
+  actorUid: string;
 }

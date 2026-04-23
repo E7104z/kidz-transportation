@@ -2,6 +2,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import { Toaster } from 'react-hot-toast';
 import Apply from './pages/public/Apply';
 import SignContract from './pages/public/SignContract';
+import HealthPage from './pages/public/Health';
 import Login from './pages/auth/Login';
 import Dashboard from './pages/admin/Dashboard';
 import PipelineKanban from './pages/admin/PipelineKanban';
@@ -30,11 +31,15 @@ import AdminLayout from './components/AdminLayout';
 import ParentLayout from './components/ParentLayout';
 import DriverLayout from './components/DriverLayout';
 import { ParentDataProvider } from './context/ParentDataContext';
+import { ImpersonationProvider } from './context/ImpersonationContext';
+import ImpersonationBanner from './components/ImpersonationBanner';
 
 
 function App() {
   return (
-    <>
+    <ImpersonationProvider>
+      <ImpersonationBanner />
+      <>
       <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <Routes>
           <Route path="/login" element={<Login />} />
@@ -104,11 +109,13 @@ function App() {
           />
           <Route path="/apply" element={<Apply />} />
           <Route path="/sign/:contractId" element={<SignContract />} />
+          <Route path="/health" element={<HealthPage />} />
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
       </Router>
       <Toaster position="top-right" toastOptions={{ duration: 3500 }} />
-    </>
+      </>
+    </ImpersonationProvider>
   );
 }
 

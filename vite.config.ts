@@ -24,4 +24,9 @@ export default defineConfig({
       'Cross-Origin-Opener-Policy': 'unsafe-none',
     },
   },
+  test: {
+    globals:     true,
+    environment: 'node',
+    include:     ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+  },
 })

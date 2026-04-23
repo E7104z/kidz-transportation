@@ -147,17 +147,14 @@ service cloud.firestore {
       allow write: if isDriver() || isAdmin();   // only drivers + admins
     }
 
-    // ── SMS queue ─────────────────────────────────────────────────────────────
-    // Drivers and the system create queue items; processing is server-side.
-    // Admins can read for monitoring; no one updates directly (functions do).
-
-    match /smsQueue/{id} {
+    // ── in-app notifications ──────────────────────────────────────────────────
+    match /notifications/{id} {
+      allow read:   if isAuth() && resource.data.recipientUid == request.auth.uid;
       allow create: if isAuth();
-      allow read:   if isAdmin();
-      allow update, delete: if false;   // Cloud Functions only (Admin SDK)
+      allow update: if isAuth() && resource.data.recipientUid == request.auth.uid
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read', 'readAt']);
+      allow delete: if isAdmin();
     }
-
-    // ── invoices ──────────────────────────────────────────────────────────────
     // Parents can read their own invoices (matched via clientId == their linkedId).
     // Admins have full access. Writes are done by Cloud Functions (Admin SDK).
 
@@ -177,6 +174,57 @@ service cloud.firestore {
       allow create: if isAdmin();
       allow read:   if isAdmin();
       allow update, delete: if false;   // Cloud Functions only (Admin SDK)
+    }
+
+    // ── driver shifts ─────────────────────────────────────────────────────────
+    match /driverShifts/{id} {
+      allow read:  if isAdmin() || (isDriver() && resource.data.driverId ==
+                     get(/databases/$(database)/documents/users/$(request.auth.uid)).data.linkedId);
+      allow create, update: if isAdmin() || (isDriver() && request.resource.data.driverId ==
+                               get(/databases/$(database)/documents/users/$(request.auth.uid)).data.linkedId);
+      allow delete: if isAdmin();
+    }
+
+    // ── driver breaks ─────────────────────────────────────────────────────────
+    match /driverBreaks/{id} {
+      allow read:  if isAdmin() || (isDriver() && resource.data.driverId ==
+                     get(/databases/$(database)/documents/users/$(request.auth.uid)).data.linkedId);
+      allow create, update: if isAdmin() || (isDriver() && request.resource.data.driverId ==
+                               get(/databases/$(database)/documents/users/$(request.auth.uid)).data.linkedId);
+      allow delete: if isAdmin();
+    }
+
+    // ── incidents ─────────────────────────────────────────────────────────────
+    match /incidents/{id} {
+      allow read:  if isAdmin() || (isAuth() && resource.data.reportedByUid == request.auth.uid);
+      allow create: if isAuth();
+      allow update, delete: if isAdmin();
+    }
+
+    // ── client communications log ──────────────────────────────────────────────
+    match /clientCommunications/{id} {
+      allow read: if isAdmin()
+                  || (isAuth() && hasClientAccess(resource.data.clientId))
+                  || (isAuth() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.linkedId == resource.data.clientId);
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ── Stripe webhook idempotency (server only via Admin SDK) ─────────────────
+    match /processedStripeEvents/{id} {
+      allow read:  if isAdmin();
+      allow write: if false;
+    }
+
+    // ── apply rate limits (server only) ───────────────────────────────────────
+    match /applyRateLimits/{id} {
+      allow read, write: if false;   // Cloud Functions Admin SDK only
+    }
+
+    // ── driver payouts (server only) ──────────────────────────────────────────
+    match /driverPayouts/{id} {
+      allow read: if isAdmin() || (isDriver() && resource.data.driverId ==
+                  get(/databases/$(database)/documents/users/$(request.auth.uid)).data.linkedId);
+      allow write: if false;   // Cloud Functions only
     }
 
   }

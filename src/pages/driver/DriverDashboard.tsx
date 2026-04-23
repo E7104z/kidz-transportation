@@ -1,6 +1,6 @@
 ﻿import React, { useEffect, useState, useMemo, useRef } from 'react';
 import {
-  doc, getDoc, collection, query, where, onSnapshot, setDoc, deleteDoc, serverTimestamp, addDoc, updateDoc,
+  doc, getDoc, getDocs, collection, query, where, onSnapshot, setDoc, deleteDoc, serverTimestamp, updateDoc,
 } from 'firebase/firestore';
 import { db } from '../../services/firebase';
 import { useAuth } from '../../context/AuthContext';
@@ -14,6 +14,9 @@ import {
 } from 'lucide-react';
 import { format } from 'date-fns';
 import toast from 'react-hot-toast';
+import { createNotification } from '../../services/notifications';
+import ShiftControls from '../../components/ShiftControls';
+import IncidentForm from '../../components/IncidentForm';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -35,6 +38,7 @@ function useDriverGPS(driverId: string | null, active: boolean) {
   const retryRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastUpdateRef = useRef<number>(0);
+  const lastWrittenPosRef = useRef<{ lat: number; lng: number } | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const wakeLockRef  = useRef<any>(null);
   const restartRef   = useRef<() => void>(() => {});
@@ -67,7 +71,23 @@ function useDriverGPS(driverId: string | null, active: boolean) {
         pos => {
           setGpsEnabled(true);
           setGpsError(null);
-          lastUpdateRef.current = Date.now();
+
+          // Battery throttle: skip Firestore write if <10 s elapsed AND moved <15 m
+          const now = Date.now();
+          const elapsed = now - lastUpdateRef.current;
+          const last = lastWrittenPosRef.current;
+          const distMoved = last
+            ? (() => {
+                const R = 6_371_000;
+                const dLat = ((pos.coords.latitude  - last.lat) * Math.PI) / 180;
+                const dLng = ((pos.coords.longitude - last.lng) * Math.PI) / 180;
+                return R * Math.sqrt(dLat * dLat + Math.cos((last.lat * Math.PI) / 180) * Math.cos((pos.coords.latitude * Math.PI) / 180) * dLng * dLng);
+              })()
+            : Infinity;
+          if (elapsed < 10_000 && distMoved < 15) return;
+
+          lastUpdateRef.current = now;
+          lastWrittenPosRef.current = { lat: pos.coords.latitude, lng: pos.coords.longitude };
           setDoc(doc(db, 'driverLocations', id), {
             driverId: id,
             lat: pos.coords.latitude,
@@ -134,11 +154,28 @@ function useDriverGPS(driverId: string | null, active: boolean) {
   return { gpsEnabled, gpsError };
 }
 
-// ── SMS helper ────────────────────────────────────────────────────────────────
+// ── notification helper ───────────────────────────────────────────────────────
 
-async function queueSms(to: string, body: string, meta?: { bookingId?: string; studentId?: string; event?: string }) {
-  if (!to) return;
-  await addDoc(collection(db, 'smsQueue'), { to: fmtPhone(to), body, ...meta, status: 'pending', createdAt: serverTimestamp() });
+async function notifyClient(
+  clientId: string,
+  payload: { title: string; body: string; bookingId?: string; studentId?: string },
+) {
+  const q   = query(collection(db, 'users'), where('linkedId', '==', clientId));
+  const snap = await getDocs(q);
+  await Promise.all(
+    snap.docs.map(d =>
+      createNotification({
+        recipientUid: d.id,
+        audience:     'parent',
+        type:         'route_update',
+        title:        payload.title,
+        body:         payload.body,
+        bookingId:    payload.bookingId,
+        studentId:    payload.studentId,
+        clientId,
+      }),
+    ),
+  );
 }
 
 // ── component ─────────────────────────────────────────────────────────────────
@@ -159,6 +196,7 @@ const DriverDashboard: React.FC = () => {
   const [isOnline,         setIsOnline]         = useState(navigator.onLine);
   const [noteDrafts,      setNoteDrafts]      = useState<Record<string, string>>({});
   const [savingNote,      setSavingNote]      = useState<string | null>(null);
+  const [showIncident,    setShowIncident]    = useState(false);
 
   const todayStr     = useMemo(() => format(new Date(), 'yyyy-MM-dd'), []);
   const todayDayName = useMemo(() => format(new Date(), 'EEEE'), []);
@@ -303,16 +341,20 @@ const DriverDashboard: React.FC = () => {
       }, { merge: true });
 
       const booking = bookings[bookingId];
-      const client  = booking ? clients[booking.clientId] : null;
       const student = students[studentId];
 
-      if (client?.phone && student) {
+      if (booking?.clientId && student) {
         const timeStr = format(new Date(), 'h:mm a');
-        const body =
-          eventType === 'picked_up'   ? `KIDZ Transportation: ${student.name} was picked up at ${timeStr}. Have a great day!` :
-          eventType === 'dropped_off' ? `KIDZ Transportation: ${student.name} was dropped off at ${timeStr}.` :
-          eventType === 'absent'      ? `KIDZ Transportation: ${student.name} was marked absent for today's route.` : '';
-        if (body) await queueSms(client.phone, body, { bookingId, studentId, event: eventType });
+        const notifBody =
+          eventType === 'picked_up'   ? `${student.name} was picked up at ${timeStr}. Have a great day!` :
+          eventType === 'dropped_off' ? `${student.name} was dropped off at ${timeStr}.` :
+          eventType === 'absent'      ? `${student.name} was marked absent for today's route.` : '';
+        if (notifBody) {
+          const title =
+            eventType === 'picked_up'   ? 'Student Picked Up' :
+            eventType === 'dropped_off' ? 'Student Dropped Off' : 'Student Absent';
+          await notifyClient(booking.clientId, { title, body: notifBody, bookingId, studentId });
+        }
       }
 
       if ((eventType === 'picked_up' || eventType === 'dropped_off') && booking) {
@@ -346,17 +388,17 @@ const DriverDashboard: React.FC = () => {
   const markRouteMissed = async (bookingId: string) => {
     if (!user || !linkedId) return;
     const booking = bookings[bookingId];
-    const client  = booking ? clients[booking.clientId] : null;
     try {
       await setDoc(doc(db, 'routeLogs', `${bookingId}_${todayStr}`), {
         bookingId, driverId: linkedId, date: todayStr, ran: false,
         confirmedBy: user.uid, confirmedAt: serverTimestamp(), notes: '',
       }, { merge: true });
-      if (client?.phone) {
-        await queueSms(client.phone,
-          `KIDZ Transportation: Today's route for your student(s) was missed. Please contact us at (314) 425-9668.`,
-          { bookingId, event: 'run_missed' },
-        );
+      if (booking?.clientId) {
+        await notifyClient(booking.clientId, {
+          title:     'Route Missed',
+          body:      `Today's route was missed. Please contact us at (314) 425-9668.`,
+          bookingId,
+        });
       }
       toast.success('Route marked as missed');
     } catch { toast.error('Failed to mark missed'); }
@@ -364,12 +406,12 @@ const DriverDashboard: React.FC = () => {
 
   const notifyNearby = async (bookingId: string) => {
     const booking = bookings[bookingId];
-    const client  = booking ? clients[booking.clientId] : null;
-    if (!client?.phone) { toast.error('No phone number on file'); return; }
-    await queueSms(client.phone,
-      `KIDZ Transportation: Your driver is approximately 10 minutes away. Please have your student(s) ready.`,
-      { bookingId, event: 'driver_nearby' },
-    );
+    if (!booking?.clientId) { toast.error('No client on file'); return; }
+    await notifyClient(booking.clientId, {
+      title:     'Driver Nearby',
+      body:      'Your driver is approximately 10 minutes away. Please have your student(s) ready.',
+      bookingId,
+    });
     toast.success('Parent notified \u2014 driver nearby');
   };
 
@@ -457,6 +499,13 @@ const DriverDashboard: React.FC = () => {
               {gpsActive ? <Wifi size={13} /> : <WifiOff size={13} />}
               <span>{gpsActive ? (gpsEnabled ? 'GPS On' : 'GPS…') : 'GPS Off'}</span>
             </button>
+            <button
+              onClick={() => setShowIncident(true)}
+              className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-full font-medium border bg-red-500/25 text-white border-red-300/40 hover:bg-red-500/40 transition-colors"
+            >
+              <AlertCircle size={13} />
+              <span>Incident</span>
+            </button>
           </div>
           <div className="grid grid-cols-3 gap-3">
             <div className="bg-white/15 rounded-xl p-3 text-center backdrop-blur">
@@ -483,6 +532,7 @@ const DriverDashboard: React.FC = () => {
       )}
 
       <div className="px-5 pt-2 pb-5">
+        {linkedId && <ShiftControls driverId={linkedId} />}
         {loading ? (
           <div className="space-y-3">
             {[1, 2, 3].map(i => <div key={i} className="bg-white rounded-2xl border border-slate-200 p-5 animate-pulse h-32" />)}
@@ -708,7 +758,20 @@ const DriverDashboard: React.FC = () => {
         )}
       </div>
     </div>
-  );
+
+    {/* Incident report bottom sheet */}
+    {showIncident && (
+      <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
+        <div className="absolute inset-0 bg-black/40" onClick={() => setShowIncident(false)} />
+        <div className="relative w-full sm:max-w-lg bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl p-6 max-h-[90vh] overflow-y-auto">
+          <IncidentForm
+            driverId={linkedId || undefined}
+            onClose={() => setShowIncident(false)}
+          />
+        </div>
+      </div>
+    )}
+  </div>
 };
 
 export default DriverDashboard;

@@ -7,6 +7,8 @@ const crypto    = require('crypto');
 
 admin.initializeApp();
 
+const { createNotification, notifyAllAdmins, notifyClientContacts } = require('./notifications');
+
 // Lazy-init Stripe — the secret key comes from environment config and may not
 // be present during deploy-time analysis. Any billing function that needs it
 // calls getStripe() which throws a clear error if the key is missing.
@@ -382,79 +384,6 @@ exports.finalizeContractSignature = functions
     return { signedPdfUrl };
   });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TRIGGER: processSmsQueue
-// Fires when a new document is created in the `smsQueue` collection.
-// Reads Twilio credentials from environment config:
-//   firebase functions:config:set twilio.sid="ACxxx" twilio.token="xxx" twilio.from="+1xxxxxxxxxx"
-// Updates the queue doc with status: 'sent' | 'failed' and timestamps.
-// ─────────────────────────────────────────────────────────────────────────────
-exports.processSmsQueue = functions.firestore
-  .document('smsQueue/{itemId}')
-  .onCreate(async (snap, context) => {
-    const data = snap.data();
-    const to   = data.to;
-    const body = data.body;
-
-    if (!to || !body) {
-      await snap.ref.update({ status: 'failed', error: 'Missing to or body', sentAt: admin.firestore.FieldValue.serverTimestamp() });
-      return;
-    }
-
-    // Read Twilio credentials from environment variables
-    const sid  = process.env.TWILIO_SID;
-    const token = process.env.TWILIO_TOKEN;
-    const from = process.env.TWILIO_FROM;
-
-    if (!sid || !token || !from) {
-      console.warn('processSmsQueue: Twilio credentials not configured. Set env vars TWILIO_SID, TWILIO_TOKEN, TWILIO_FROM');
-      await snap.ref.update({ status: 'failed', error: 'Twilio not configured', sentAt: admin.firestore.FieldValue.serverTimestamp() });
-      return;
-    }
-
-    try {
-      // Use the Twilio REST API directly with fetch (no SDK dependency needed)
-      const credentials = Buffer.from(`${sid}:${token}`).toString('base64');
-      const url = `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`;
-      const params = new URLSearchParams({ To: to, From: from, Body: body });
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Basic ${credentials}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: params.toString(),
-      });
-
-      const result = await response.json();
-
-      if (response.ok && result.sid) {
-        await snap.ref.update({
-          status:    'sent',
-          twilioSid: result.sid,
-          sentAt:    admin.firestore.FieldValue.serverTimestamp(),
-        });
-        console.log(`SMS sent: ${result.sid} → ${to}`);
-      } else {
-        const errMsg = result.message || `HTTP ${response.status}`;
-        await snap.ref.update({
-          status: 'failed',
-          error:  errMsg,
-          sentAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-        console.error(`SMS failed for ${to}: ${errMsg}`);
-      }
-    } catch (err) {
-      await snap.ref.update({
-        status: 'failed',
-        error:  err?.message || String(err),
-        sentAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-      console.error('processSmsQueue error:', err);
-    }
-  });
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // BILLING & STRIPE FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -585,6 +514,15 @@ exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
   const db = admin.firestore();
   const now = admin.firestore.FieldValue.serverTimestamp();
 
+  // ── Idempotency guard ───────────────────────────────────────────────────────
+  const idempotencyRef = db.collection('processedStripeEvents').doc(event.id);
+  const idempotencySnap = await idempotencyRef.get();
+  if (idempotencySnap.exists) {
+    console.log(`Stripe event ${event.id} already processed — skipping`);
+    return res.status(200).send('ok');
+  }
+  // ── End idempotency guard ───────────────────────────────────────────────────
+
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
     const invoiceId = session.metadata?.invoiceId;
@@ -630,6 +568,13 @@ exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
       } catch (e) { console.warn('Could not save payment method details:', e.message); }
     }
   }
+
+  // Mark event as processed for future idempotency checks
+  await idempotencyRef.set({
+    eventType: event.type,
+    processedAt: now,
+    livemode: event.livemode,
+  });
 
   res.status(200).send('ok');
 });
@@ -1788,3 +1733,271 @@ exports.acceptContactInvite = functions.https.onCall(async (data, context) => {
   return { success: true, clientId, role: inviteData.role };
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SCHEDULED: checkDocumentExpiration
+// Runs daily. Scans all driver documents for expiry and sends in-app
+// notifications at 30-day, 14-day, and 3-day thresholds.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.checkDocumentExpiration = functions.pubsub
+  .schedule('every 24 hours')
+  .onRun(async () => {
+    const db  = admin.firestore();
+    const now = Date.now();
+
+    const DOC_TYPES = ['license', 'insurance', 'backgroundCheck', 'cpr', 'childPassengerSafety', 'vehicleInspection'];
+    const THRESHOLDS = [
+      { days: 30, field: 'reminderSentAt30' },
+      { days: 14, field: 'reminderSentAt14' },
+      { days:  3, field: 'reminderSentAt3'  },
+    ];
+
+    const driversSnap = await db.collection('drivers').get();
+
+    const tasks = driversSnap.docs.map(async driverDoc => {
+      const driver = driverDoc.data();
+      const driverId = driverDoc.id;
+
+      // Find the uid of this driver's user account so we can send them a notification
+      const userSnap = await db.collection('users')
+        .where('linkedId', '==', driverId)
+        .limit(1)
+        .get();
+      const driverUid = userSnap.empty ? null : userSnap.docs[0].id;
+
+      for (const docType of DOC_TYPES) {
+        const docData = driver.documents?.[docType];
+        if (!docData?.expiresAt) continue;
+
+        const expiresAtMs = docData.expiresAt.toMillis ? docData.expiresAt.toMillis() : docData.expiresAt;
+        const daysLeft = Math.ceil((expiresAtMs - now) / (1000 * 60 * 60 * 24));
+        if (daysLeft < 0) continue; // already expired — handled separately
+
+        for (const threshold of THRESHOLDS) {
+          if (daysLeft > threshold.days) continue;
+          if (docData[threshold.field]) continue; // reminder already sent
+
+          // Notify driver
+          if (driverUid) {
+            await createNotification({
+              recipientUid: driverUid,
+              audience:     'driver',
+              type:         'doc_expiring_soon',
+              title:        `Document Expiring Soon`,
+              body:         `Your ${docType} expires in ${daysLeft} day${daysLeft === 1 ? '' : 's'}. Please upload a renewal.`,
+              driverId,
+              priority:     daysLeft <= 3 ? 'high' : 'normal',
+            });
+          }
+
+          // Notify admins
+          await notifyAllAdmins({
+            type:     'doc_expiring_soon',
+            title:    `Driver Doc Expiring — ${driver.name ?? driverId}`,
+            body:     `${driver.name ?? driverId}'s ${docType} expires in ${daysLeft} day${daysLeft === 1 ? '' : 's'}.`,
+            driverId,
+            priority: daysLeft <= 3 ? 'high' : 'normal',
+          });
+
+          // Mark reminder sent
+          await driverDoc.ref.update({
+            [`documents.${docType}.${threshold.field}`]: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          break; // Only send one threshold reminder per run
+        }
+      }
+    });
+
+    await Promise.allSettled(tasks);
+    console.log(`checkDocumentExpiration: processed ${driversSnap.size} drivers`);
+    return null;
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCHEDULED: generateWeeklyInvoicesAuto
+// Runs every Monday at 6 AM Central to automatically generate weekly invoices.
+// P12 — Invoice automation
+// ─────────────────────────────────────────────────────────────────────────────
+exports.generateWeeklyInvoicesAuto = functions.pubsub
+  .schedule('every monday 06:00')
+  .timeZone('America/Chicago')
+  .onRun(async () => {
+    try {
+      const result = await doGenerateWeeklyInvoices(null);
+      console.log('generateWeeklyInvoicesAuto completed:', result);
+
+      // Notify admins
+      await notifyAllAdmins({
+        type:     'invoice_generated',
+        title:    'Weekly Invoices Generated',
+        body:     `Automated weekly invoice run completed. ${result?.created ?? 0} invoice(s) created.`,
+        priority: 'normal',
+      });
+    } catch (err) {
+      console.error('generateWeeklyInvoicesAuto failed:', err);
+      await notifyAllAdmins({
+        type:     'admin_alert',
+        title:    'Invoice Generation Failed',
+        body:     `Automated weekly invoice run failed: ${err.message}`,
+        priority: 'high',
+      });
+    }
+    return null;
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P13 — Stripe Connect: create onboarding link for a driver
+// CALLABLE: createConnectOnboardingLink
+// Payload: { driverId: string }
+// ─────────────────────────────────────────────────────────────────────────────
+exports.createConnectOnboardingLink = functions.https.onCall(async (data, context) => {
+  await assertAdmin(context);
+  const { driverId } = data;
+  if (!driverId) throw new functions.https.HttpsError('invalid-argument', 'driverId is required.');
+
+  const db = admin.firestore();
+  const stripe = getStripe();
+  const driverSnap = await db.collection('drivers').doc(driverId).get();
+  if (!driverSnap.exists) throw new functions.https.HttpsError('not-found', 'Driver not found.');
+
+  const driver = driverSnap.data();
+  let accountId = driver.stripeConnectAccountId;
+
+  if (!accountId) {
+    const account = await stripe.accounts.create({
+      type:         'express',
+      country:      'US',
+      email:        driver.email ?? undefined,
+      capabilities: { transfers: { requested: true } },
+      business_type: 'individual',
+      metadata:     { driverId },
+    });
+    accountId = account.id;
+    await db.collection('drivers').doc(driverId).update({
+      stripeConnectAccountId: accountId,
+      stripeConnectOnboarded:  false,
+      stripeConnectPayoutsEnabled: false,
+    });
+  }
+
+  const origin = process.env.APP_ORIGIN ?? 'https://kidzstl.com';
+  const link = await stripe.accountLinks.create({
+    account:      accountId,
+    refresh_url:  `${origin}/admin/drivers?connect=refresh&driverId=${driverId}`,
+    return_url:   `${origin}/admin/drivers?connect=success&driverId=${driverId}`,
+    type:         'account_onboarding',
+  });
+
+  return { url: link.url };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P13 — Stripe Connect: issue a payout to a driver
+// CALLABLE: issueDriverPayout
+// Payload: { driverId: string, amountCents: number, description?: string }
+// ─────────────────────────────────────────────────────────────────────────────
+exports.issueDriverPayout = functions.https.onCall(async (data, context) => {
+  await assertAdmin(context);
+  const { driverId, amountCents, description } = data;
+  if (!driverId || !amountCents) {
+    throw new functions.https.HttpsError('invalid-argument', 'driverId and amountCents are required.');
+  }
+
+  const db = admin.firestore();
+  const stripe = getStripe();
+  const driverSnap = await db.collection('drivers').doc(driverId).get();
+  if (!driverSnap.exists) throw new functions.https.HttpsError('not-found', 'Driver not found.');
+
+  const driver = driverSnap.data();
+  const accountId = driver.stripeConnectAccountId;
+  if (!accountId) throw new functions.https.HttpsError('failed-precondition', 'Driver has not connected a Stripe account.');
+  if (!driver.stripeConnectPayoutsEnabled) {
+    throw new functions.https.HttpsError('failed-precondition', 'Driver payouts are not enabled yet. Complete Stripe onboarding first.');
+  }
+
+  const now = admin.firestore.FieldValue.serverTimestamp();
+
+  // Transfer funds from platform account to driver's connected account
+  const transfer = await stripe.transfers.create({
+    amount:      amountCents,
+    currency:    'usd',
+    destination: accountId,
+    description: description ?? `KIDZ Transportation driver payout`,
+    metadata:    { driverId },
+  });
+
+  const payoutRef = await db.collection('driverPayouts').add({
+    driverId,
+    stripeTransferId:    transfer.id,
+    stripeConnectAccountId: accountId,
+    amountCents,
+    currency:            'usd',
+    description:         description ?? null,
+    status:              'paid',
+    createdAt:           now,
+    paidAt:              now,
+    periodStart:         null,
+    periodEnd:           null,
+    hoursWorked:         null,
+    ratePerHour:         null,
+  });
+
+  await db.collection('auditLog').add({
+    action:     'driver_payout_issued',
+    collection: 'driverPayouts',
+    docId:      payoutRef.id,
+    driverId,
+    amountCents,
+    stripeTransferId: transfer.id,
+    issuedBy:   context.auth?.uid,
+    timestamp:  now,
+  });
+
+  // Notify driver
+  const userSnap = await db.collection('users').where('linkedId', '==', driverId).limit(1).get();
+  if (!userSnap.empty) {
+    await createNotification({
+      recipientUid: userSnap.docs[0].id,
+      audience:     'driver',
+      type:         'payout_issued',
+      title:        'Payout Sent',
+      body:         `A payout of $${(amountCents / 100).toFixed(2)} has been sent to your account.`,
+      driverId,
+      priority:     'normal',
+    });
+  }
+
+  return { success: true, payoutId: payoutRef.id, transferId: transfer.id };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P13 — Stripe Connect webhook: sync account status
+// Updates stripeConnectOnboarded + stripeConnectPayoutsEnabled when Stripe
+// sends account.updated events.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.stripeConnectWebhook = functions.https.onRequest(async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
+
+  const sig = req.headers['stripe-signature'];
+  const connectSecret = process.env.STRIPE_CONNECT_WEBHOOK_SECRET;
+  let event;
+  try {
+    event = getStripe().webhooks.constructEvent(req.rawBody, sig, connectSecret);
+  } catch (err) {
+    console.error('Connect webhook signature failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  if (event.type === 'account.updated') {
+    const account = event.data.object;
+    const driverId = account.metadata?.driverId;
+    if (driverId) {
+      const db = admin.firestore();
+      await db.collection('drivers').doc(driverId).update({
+        stripeConnectOnboarded:      account.details_submitted ?? false,
+        stripeConnectPayoutsEnabled: account.payouts_enabled   ?? false,
+      });
+    }
+  }
+
+  res.status(200).send('ok');
+});

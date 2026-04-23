@@ -1,6 +1,26 @@
 /** @type {import('tailwindcss').Config} */
 module.exports = {
   content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
+  safelist: [
+    // Dynamically applied status colours for booking/incident/document cards
+    { pattern: /bg-(green|amber|red|orange|blue|indigo|teal|violet|slate|emerald|rose)-(50|100|200|500|600|700)/ },
+    { pattern: /text-(green|amber|red|orange|blue|indigo|teal|violet|slate|emerald|rose)-(500|600|700|800)/ },
+    { pattern: /border-(green|amber|red|orange|blue|indigo|teal|violet|slate|emerald|rose)-(200|300|400)/ },
+    { pattern: /ring-(green|amber|red|orange|blue|indigo|teal|violet|slate|emerald|rose)-(400|500)/ },
+    // Severity badge combos used in IncidentForm
+    'bg-emerald-100', 'text-emerald-700', 'border-emerald-300',
+    'bg-amber-100',   'text-amber-700',   'border-amber-300',
+    'bg-orange-100',  'text-orange-700',  'border-orange-300',
+    'bg-red-100',     'text-red-700',     'border-red-300',
+    // ShiftControls status pills
+    'bg-green-100', 'text-green-700',
+    'bg-amber-50',  'text-amber-700',
+    'bg-red-50',    'text-red-700',
+    // ImpersonationBanner
+    'bg-amber-500',
+    // NotificationBell priority
+    'bg-red-500',
+  ],
   theme: {
     extend: {
       colors: {

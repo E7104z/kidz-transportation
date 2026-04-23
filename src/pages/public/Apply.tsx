@@ -297,6 +297,16 @@ const Apply: React.FC = () => {
 	const handleSubmit = async () => {
 		const errs = validateStep(state.step);
 		if (Object.keys(errs).length) { dispatch({ type: 'SET_ERRORS', value: errs }); return; }
+
+		// Rate-limit: allow one submission per browser per hour
+		const RATE_KEY = 'kidz_apply_last_submit';
+		const RATE_MS  = 60 * 60 * 1000; // 1 hour
+		const lastSubmit = Number(localStorage.getItem(RATE_KEY) ?? 0);
+		if (Date.now() - lastSubmit < RATE_MS) {
+			dispatch({ type: 'SET_SUBMIT_ERROR', value: 'You have already submitted an application recently. Please wait before submitting again.' });
+			return;
+		}
+
 		dispatch({ type: 'SET_SUBMITTING', value: true });
 		try {
 			const trimmedEmail = state.parent.email.trim().toLowerCase();
@@ -331,6 +341,7 @@ const Apply: React.FC = () => {
 				applicationFeePaid: false, notes: '', createdAt: serverTimestamp(),
 			});
 			dispatch({ type: 'SET_SUBMITTED', value: true });
+			localStorage.setItem(RATE_KEY, String(Date.now()));
 		} catch {
 			dispatch({ type: 'SET_SUBMIT_ERROR', value: 'Submission failed. Please try again.' });
 		} finally {

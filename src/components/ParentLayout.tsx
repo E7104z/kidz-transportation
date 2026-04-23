@@ -4,6 +4,7 @@ import {
   LayoutDashboard, Users, BookOpen, Navigation, UserCircle,
   Receipt, LogOut, Menu, X, ChevronRight,
 } from 'lucide-react';
+import NotificationBell from './NotificationBell';
 import { useAuth } from '../context/AuthContext';
 import { useParentContext } from '../context/ParentDataContext';
 import logo from '../assets/KIDZ logo4 site.png';
@@ -101,7 +102,8 @@ const ParentLayout: React.FC<React.PropsWithChildren> = ({ children }) => {
           <button onClick={() => setMobileOpen(true)} className="text-slate-600">
             <Menu size={22} />
           </button>
-          <img src={logo} alt="KIDZ" className="h-8 w-auto" />
+          <img src={logo} alt="KIDZ" className="h-8 w-auto flex-1" />
+          <NotificationBell colorClass="text-slate-600" />
         </div>
 
         <div className="p-4 sm:p-6 lg:p-8">

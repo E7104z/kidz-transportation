@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { Bus, LayoutDashboard, History, User, LogOut } from 'lucide-react';
+import NotificationBell from './NotificationBell';
 import { doc, getDoc, deleteDoc } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import { useAuth } from '../context/AuthContext';
@@ -87,10 +88,13 @@ const DriverLayout: React.FC = () => {
               <div className="text-teal-100 text-xs">KIDZ Driver</div>
             </div>
           </div>
-          <button onClick={handleLogout}
-            className="flex items-center gap-1.5 bg-white/20 hover:bg-white/30 text-white text-xs font-medium px-3 py-1.5 rounded-lg transition-colors">
-            <LogOut size={13} /> Logout
-          </button>
+          <div className="flex items-center gap-2">
+            <NotificationBell colorClass="text-white" />
+            <button onClick={handleLogout}
+              className="flex items-center gap-1.5 bg-white/20 hover:bg-white/30 text-white text-xs font-medium px-3 py-1.5 rounded-lg transition-colors">
+              <LogOut size={13} /> Logout
+            </button>
+          </div>
         </div>
 
         <Outlet />
