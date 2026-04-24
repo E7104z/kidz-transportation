@@ -306,6 +306,8 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
   const [togglingFee, setTogglingFee] = useState(false);
   const [savingStartDate, setSavingStartDate] = useState(false);
   const [sendingEmail, setSendingEmail] = useState(false);
+  const [weeklyRateStr, setWeeklyRateStr] = useState('');
+  const [dailyRateStr, setDailyRateStr] = useState('');
 
   useEffect(() => {
     const q = query(collection(db, 'contracts'), where('clientId', '==', client.id), orderBy('generatedAt', 'desc'));
@@ -661,7 +663,7 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
               ) : (
                 <>
                   {!editingBooking ? (
-                    <div className="flex justify-end"><button onClick={() => { setBookingForm({ ...booking }); setEditingBooking(true); }} className="inline-flex items-center gap-1.5 text-sm text-violet-600 hover:text-violet-800 font-semibold"><Edit2 size={13} /> Edit Booking</button></div>
+                    <div className="flex justify-end"><button onClick={() => { setBookingForm({ ...booking }); setWeeklyRateStr((booking.weeklyRate ?? pricing.weekly).toFixed(2)); setDailyRateStr((booking.dailyRate ?? pricing.daily).toFixed(2)); setEditingBooking(true); }} className="inline-flex items-center gap-1.5 text-sm text-violet-600 hover:text-violet-800 font-semibold"><Edit2 size={13} /> Edit Booking</button></div>
                   ) : (
                     <div className="flex justify-end gap-2">
                       <button onClick={saveBooking} disabled={savingBooking} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white rounded-lg text-sm font-semibold disabled:opacity-60">{savingBooking ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Save</button>
@@ -708,7 +710,7 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
                       {editingBooking && (
                         <button
                           type="button"
-                          onClick={() => setBookingForm(f => ({ ...f, weeklyRate: pricing.weekly, dailyRate: pricing.daily }))}
+                          onClick={() => { setBookingForm(f => ({ ...f, weeklyRate: pricing.weekly, dailyRate: pricing.daily })); setWeeklyRateStr(pricing.weekly.toFixed(2)); setDailyRateStr(pricing.daily.toFixed(2)); }}
                           className="text-xs text-violet-500 hover:text-violet-700 font-medium"
                         >
                           Reset to auto
@@ -721,11 +723,16 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
                           <div>
                             <label className="block text-xs text-slate-500 mb-1">Weekly Rate ($)</label>
                             <input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              value={bookingForm.weeklyRate ?? pricing.weekly}
-                              onChange={e => setBookingForm(f => ({ ...f, weeklyRate: Number(e.target.value) }))}
+                              type="text"
+                              inputMode="decimal"
+                              value={weeklyRateStr}
+                              onChange={e => setWeeklyRateStr(e.target.value)}
+                              onBlur={() => {
+                                const n = parseFloat(weeklyRateStr);
+                                const val = isNaN(n) || n < 0 ? 0 : Math.round(n * 100) / 100;
+                                setWeeklyRateStr(val.toFixed(2));
+                                setBookingForm(f => ({ ...f, weeklyRate: val }));
+                              }}
                               className="w-full border border-blue-200 rounded-lg px-3 py-2 text-slate-800 font-semibold text-sm bg-white focus:outline-none focus:ring-2 focus:ring-violet-400"
                             />
                             <div className="text-[11px] text-slate-400 mt-1">Auto: ${pricing.weekly.toFixed(2)}</div>
@@ -733,11 +740,16 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
                           <div>
                             <label className="block text-xs text-slate-500 mb-1">Daily Rate ($)</label>
                             <input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              value={bookingForm.dailyRate ?? pricing.daily}
-                              onChange={e => setBookingForm(f => ({ ...f, dailyRate: Number(e.target.value) }))}
+                              type="text"
+                              inputMode="decimal"
+                              value={dailyRateStr}
+                              onChange={e => setDailyRateStr(e.target.value)}
+                              onBlur={() => {
+                                const n = parseFloat(dailyRateStr);
+                                const val = isNaN(n) || n < 0 ? 0 : Math.round(n * 100) / 100;
+                                setDailyRateStr(val.toFixed(2));
+                                setBookingForm(f => ({ ...f, dailyRate: val }));
+                              }}
                               className="w-full border border-blue-200 rounded-lg px-3 py-2 text-slate-800 font-semibold text-sm bg-white focus:outline-none focus:ring-2 focus:ring-violet-400"
                             />
                             <div className="text-[11px] text-slate-400 mt-1">Auto: ${pricing.daily.toFixed(2)}</div>
