@@ -348,7 +348,7 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
   const saveBooking = async () => {
     if (!booking) return;
     setSavingBooking(true);
-    try { await updateDoc(doc(db, 'bookings', booking.id), { ...bookingForm, weeklyRate: pricing.weekly, dailyRate: pricing.daily, updatedAt: serverTimestamp() }); toast.success('Booking updated'); setEditingBooking(false); }
+    try { await updateDoc(doc(db, 'bookings', booking.id), { ...bookingForm, weeklyRate: bookingForm.weeklyRate ?? pricing.weekly, dailyRate: bookingForm.dailyRate ?? pricing.daily, updatedAt: serverTimestamp() }); toast.success('Booking updated'); setEditingBooking(false); }
     catch { toast.error('Failed to save booking'); } finally { setSavingBooking(false); }
   };
 
@@ -703,10 +703,52 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
                     </div>
                   </div>
                   <div className="bg-blue-50 border border-blue-100 rounded-xl p-4">
-                    <div className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Pricing</div>
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="text-xs font-bold text-slate-500 uppercase tracking-widest">Pricing</div>
+                      {editingBooking && (
+                        <button
+                          type="button"
+                          onClick={() => setBookingForm(f => ({ ...f, weeklyRate: pricing.weekly, dailyRate: pricing.daily }))}
+                          className="text-xs text-violet-500 hover:text-violet-700 font-medium"
+                        >
+                          Reset to auto
+                        </button>
+                      )}
+                    </div>
                     <div className="grid grid-cols-2 gap-4">
-                      <div><div className="text-2xl font-bold text-slate-800">${pricing.weekly.toFixed(2)}</div><div className="text-xs text-slate-500">Weekly Rate</div></div>
-                      <div><div className="text-2xl font-bold text-slate-800">${pricing.daily.toFixed(2)}</div><div className="text-xs text-slate-500">Daily Rate</div></div>
+                      {editingBooking ? (
+                        <>
+                          <div>
+                            <label className="block text-xs text-slate-500 mb-1">Weekly Rate ($)</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              value={bookingForm.weeklyRate ?? pricing.weekly}
+                              onChange={e => setBookingForm(f => ({ ...f, weeklyRate: Number(e.target.value) }))}
+                              className="w-full border border-blue-200 rounded-lg px-3 py-2 text-slate-800 font-semibold text-sm bg-white focus:outline-none focus:ring-2 focus:ring-violet-400"
+                            />
+                            <div className="text-[11px] text-slate-400 mt-1">Auto: ${pricing.weekly.toFixed(2)}</div>
+                          </div>
+                          <div>
+                            <label className="block text-xs text-slate-500 mb-1">Daily Rate ($)</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              value={bookingForm.dailyRate ?? pricing.daily}
+                              onChange={e => setBookingForm(f => ({ ...f, dailyRate: Number(e.target.value) }))}
+                              className="w-full border border-blue-200 rounded-lg px-3 py-2 text-slate-800 font-semibold text-sm bg-white focus:outline-none focus:ring-2 focus:ring-violet-400"
+                            />
+                            <div className="text-[11px] text-slate-400 mt-1">Auto: ${pricing.daily.toFixed(2)}</div>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div><div className="text-2xl font-bold text-slate-800">${(booking?.weeklyRate ?? pricing.weekly).toFixed(2)}</div><div className="text-xs text-slate-500">Weekly Rate</div></div>
+                          <div><div className="text-2xl font-bold text-slate-800">${(booking?.dailyRate ?? pricing.daily).toFixed(2)}</div><div className="text-xs text-slate-500">Daily Rate</div></div>
+                        </>
+                      )}
                     </div>
                   </div>
                 </>
