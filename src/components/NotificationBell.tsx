@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Bell } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
-import { subscribeToNotifications, markNotificationRead } from '../services/notifications';
+import { useNotifications } from '../hooks/useNotifications';
 import type { AppNotification } from '../types';
 
 interface Props {
@@ -10,17 +9,9 @@ interface Props {
 }
 
 const NotificationBell: React.FC<Props> = ({ colorClass = 'text-current' }) => {
-  const { user } = useAuth();
-  const [items, setItems]     = useState<AppNotification[]>([]);
-  const [open, setOpen]       = useState(false);
-  const panelRef              = useRef<HTMLDivElement>(null);
-
-  // Subscribe to the user's notifications
-  useEffect(() => {
-    if (!user) return;
-    const unsub = subscribeToNotifications(user.uid, setItems);
-    return unsub;
-  }, [user]);
+  const { notifications, unreadCount, markRead, markAllRead } = useNotifications();
+  const [open, setOpen] = useState(false);
+  const panelRef        = useRef<HTMLDivElement>(null);
 
   // Browser notification permission
   useEffect(() => {
@@ -32,13 +23,13 @@ const NotificationBell: React.FC<Props> = ({ colorClass = 'text-current' }) => {
   // Push browser notifications for new unread items
   const prevCountRef = useRef(0);
   useEffect(() => {
-    const unread = items.filter(n => !n.read);
+    const unread = notifications.filter(n => !n.read);
     if (unread.length > prevCountRef.current && Notification.permission === 'granted') {
       const newest = unread[0];
-      new Notification(newest.title, { body: newest.body, icon: '/favicon.ico' });
+      if (newest) new Notification(newest.title, { body: newest.body, icon: '/favicon.ico' });
     }
     prevCountRef.current = unread.length;
-  }, [items]);
+  }, [notifications]);
 
   // Close panel when clicking outside
   useEffect(() => {
@@ -52,21 +43,14 @@ const NotificationBell: React.FC<Props> = ({ colorClass = 'text-current' }) => {
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
-  const unreadCount = items.filter(n => !n.read).length;
-  const recent      = items.slice(0, 20);
+  const recent = notifications.slice(0, 20);
 
   const handleOpen = () => setOpen(v => !v);
 
   const handleRead = async (n: AppNotification) => {
-    if (!n.read) await markNotificationRead(n.id!);
+    if (!n.read && n.id) await markRead(n.id);
     if (n.linkTo) window.location.href = n.linkTo;
     setOpen(false);
-  };
-
-  const markAllRead = async () => {
-    await Promise.all(
-      items.filter(n => !n.read).map(n => markNotificationRead(n.id!)),
-    );
   };
 
   return (

@@ -118,6 +118,16 @@ export interface Driver {
   };
   // Flexible bucket for any future document types
   additionalDocuments?: DriverDocument[];
+  // Emergency override — lets admin green-light a driver before all required
+  // documents are on file. Time-limited and fully audited.
+  emergencyOverride?: {
+    active: boolean;
+    approvedByUid: string;
+    approvedByName: string;
+    approvedAt: Timestamp;
+    expiresAt: Timestamp;
+    reason: string;
+  };
 }
 
 export type RouteAssignmentStatus = 'pending' | 'paid';

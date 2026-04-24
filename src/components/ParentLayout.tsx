@@ -2,9 +2,10 @@ import React, { useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Users, BookOpen, Navigation, UserCircle,
-  Receipt, LogOut, Menu, X, ChevronRight,
+  Receipt, LogOut, Menu, X, ChevronRight, Bell,
 } from 'lucide-react';
-import NotificationBell from './NotificationBell';
+import NotificationDrawer from './NotificationDrawer';
+import { useNotifications } from '../hooks/useNotifications';
 import { useAuth } from '../context/AuthContext';
 import { useParentContext } from '../context/ParentDataContext';
 import logo from '../assets/KIDZ logo4 site.png';
@@ -12,8 +13,10 @@ import logo from '../assets/KIDZ logo4 site.png';
 const ParentLayout: React.FC<React.PropsWithChildren> = ({ children }) => {
   const { user, signOut } = useAuth();
   const { permissions } = useParentContext();
+  const { unreadCount } = useNotifications();
   const navigate = useNavigate();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   const navItems = [
     { to: '/parent/dashboard', label: 'Dashboard',    icon: LayoutDashboard, show: true },
@@ -34,6 +37,24 @@ const ParentLayout: React.FC<React.PropsWithChildren> = ({ children }) => {
       {/* Logo */}
       <div className="px-6 py-5 border-b border-white/10 flex items-center justify-center">
         <img src={logo} alt="KIDZ Transportation" className="h-16 w-auto object-contain" />
+      </div>
+
+      {/* Notifications button */}
+      <div className="px-4 pt-3">
+        <button
+          onClick={() => { setDrawerOpen(true); setMobileOpen(false); }}
+          className="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-medium text-blue-100 hover:bg-white/10 hover:text-white transition-all duration-150"
+        >
+          <div className="relative">
+            <Bell size={18} />
+            {unreadCount > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center px-0.5">
+                {unreadCount > 99 ? '99+' : unreadCount}
+              </span>
+            )}
+          </div>
+          Notifications
+        </button>
       </div>
 
       {/* Nav */}
@@ -103,13 +124,26 @@ const ParentLayout: React.FC<React.PropsWithChildren> = ({ children }) => {
             <Menu size={22} />
           </button>
           <img src={logo} alt="KIDZ" className="h-8 w-auto flex-1" />
-          <NotificationBell colorClass="text-slate-600" />
+          <button
+            onClick={() => setDrawerOpen(true)}
+            aria-label={`Notifications${unreadCount ? ` (${unreadCount} unread)` : ''}`}
+            className="relative p-1.5 rounded-full hover:bg-slate-100 transition-colors text-slate-600"
+          >
+            <Bell size={20} />
+            {unreadCount > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center px-0.5">
+                {unreadCount > 99 ? '99+' : unreadCount}
+              </span>
+            )}
+          </button>
         </div>
 
         <div className="p-4 sm:p-6 lg:p-8">
           {children}
         </div>
       </main>
+
+      <NotificationDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
     </div>
   );
 };

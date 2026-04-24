@@ -2,8 +2,10 @@ import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { collection, onSnapshot, addDoc, deleteDoc, doc, getDoc, updateDoc, serverTimestamp, getDocs, query, where, writeBatch } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL, uploadBytesResumable } from 'firebase/storage';
 import { db, storage } from '../../services/firebase';
+import { useAuth } from '../../context/AuthContext';
 import type { Driver, DriverDocument, RouteAssignment, Booking, Client, Student } from '../../types';
-import { Car, Mail, Phone, Plus, X, Check, Link as LinkIcon, MapPin, Clock, Trash2, AlertTriangle, Pencil, Camera, User as UserIcon, FileText, UploadCloud, ExternalLink, Download, Loader2 } from 'lucide-react';
+import { Car, Mail, Phone, Plus, X, Check, Link as LinkIcon, MapPin, Clock, Trash2, AlertTriangle, Pencil, Camera, User as UserIcon, FileText, UploadCloud, ExternalLink, Download, Loader2, ShieldAlert, ShieldOff } from 'lucide-react';
+import toast from 'react-hot-toast';
 
 interface DriverForm {
   name: string;
@@ -21,7 +23,17 @@ function getWeekStart(): Date {
   return monday;
 }
 
+/** Returns true if the driver currently has an active, non-expired emergency override. */
+function isOverrideActive(d: Driver): boolean {
+  const ov = d.emergencyOverride;
+  if (!ov || !ov.active) return false;
+  const exp = (ov.expiresAt as unknown as { toDate?: () => Date })?.toDate?.();
+  if (!exp) return false;
+  return exp.getTime() > Date.now();
+}
+
 const Drivers: React.FC = () => {
+  const { user } = useAuth();
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [assignments, setAssignments] = useState<RouteAssignment[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
@@ -38,6 +50,12 @@ const Drivers: React.FC = () => {
   const [confirmDeleteDriver, setConfirmDeleteDriver] = useState<string | null>(null);
   const [deletingDriver, setDeletingDriver] = useState(false);
   const [cleaningOrphans, setCleaningOrphans] = useState(false);
+
+  // Emergency override modal state
+  const [overrideTarget, setOverrideTarget] = useState<Driver | null>(null);
+  const [overrideReason, setOverrideReason] = useState('');
+  const [overrideDays,   setOverrideDays]   = useState(7);
+  const [savingOverride, setSavingOverride] = useState(false);
 
   // Edit driver state
   const [editTarget, setEditTarget]   = useState<Driver | null>(null);
@@ -312,6 +330,54 @@ const Drivers: React.FC = () => {
     setEditTarget(prev => prev ? { ...prev, additionalDocuments: updated } : prev);
   };
 
+  // ── Emergency override ──────────────────────────────────────────────────
+  const openOverrideModal = (d: Driver) => {
+    setOverrideTarget(d);
+    setOverrideReason('');
+    setOverrideDays(7);
+  };
+
+  const grantOverride = async () => {
+    if (!overrideTarget || !user) return;
+    const reason = overrideReason.trim();
+    if (!reason) { toast.error('Reason is required'); return; }
+    const days = Math.max(1, Math.min(30, Math.floor(overrideDays)));
+    setSavingOverride(true);
+    try {
+      const expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + days);
+      const override = {
+        active:         true,
+        approvedByUid:  user.uid,
+        approvedByName: user.email ?? 'admin',
+        approvedAt:     serverTimestamp(),
+        expiresAt,
+        reason,
+      };
+      await updateDoc(doc(db, 'drivers', overrideTarget.id), { emergencyOverride: override });
+      toast.success(`Emergency override granted — expires in ${days} day${days !== 1 ? 's' : ''}`);
+      setOverrideTarget(null);
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Failed to grant override');
+    } finally {
+      setSavingOverride(false);
+    }
+  };
+
+  const revokeOverride = async (driverId: string) => {
+    try {
+      await updateDoc(doc(db, 'drivers', driverId), { 'emergencyOverride.active': false });
+      toast.success('Emergency override revoked');
+      if (editTarget?.id === driverId) {
+        setEditTarget(prev => prev && prev.emergencyOverride
+          ? { ...prev, emergencyOverride: { ...prev.emergencyOverride, active: false } }
+          : prev);
+      }
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Failed to revoke override');
+    }
+  };
+
   const saveEdit = async () => {
     if (!editTarget) return;
     setSavingEdit(true);
@@ -463,6 +529,11 @@ const Drivers: React.FC = () => {
                         </div>
                       </div>
                       <div className="flex items-center gap-1.5 shrink-0">
+                        {isOverrideActive(d) && (
+                          <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 inline-flex items-center gap-1" title="Emergency override active">
+                            <ShieldAlert size={11} /> Emergency
+                          </span>
+                        )}
                         <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${d.uid ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
                           {d.uid ? 'Linked' : 'No account'}
                         </span>
@@ -825,6 +896,46 @@ const Drivers: React.FC = () => {
               {/* ── DOCUMENTS TAB ─────────────────────────────────────────── */}
               {editTab === 'documents' && (
                 <div className="space-y-4">
+                  {/* Emergency override panel */}
+                  <div className={`rounded-xl border p-4 ${isOverrideActive(editTarget) ? 'bg-amber-50 border-amber-300' : 'bg-slate-50 border-slate-200'}`}>
+                    <div className="flex items-start gap-3">
+                      <ShieldAlert size={18} className={isOverrideActive(editTarget) ? 'text-amber-600 mt-0.5' : 'text-slate-400 mt-0.5'} />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-semibold text-slate-800">Emergency Override</div>
+                        {isOverrideActive(editTarget) && editTarget.emergencyOverride ? (
+                          <>
+                            <div className="text-xs text-slate-600 mt-1">
+                              Active — driver may operate without complete documents.
+                            </div>
+                            <div className="text-xs text-slate-500 mt-2 space-y-0.5">
+                              <div><span className="font-semibold">Approved by:</span> {editTarget.emergencyOverride.approvedByName}</div>
+                              <div><span className="font-semibold">Expires:</span> {(editTarget.emergencyOverride.expiresAt as unknown as { toDate?: () => Date })?.toDate?.()?.toLocaleString() ?? '—'}</div>
+                              <div><span className="font-semibold">Reason:</span> {editTarget.emergencyOverride.reason}</div>
+                            </div>
+                            <button
+                              onClick={() => revokeOverride(editTarget.id)}
+                              className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold bg-white border border-amber-300 text-amber-700 hover:bg-amber-100 rounded-lg px-3 py-1.5 transition-colors"
+                            >
+                              <ShieldOff size={12} /> End Override
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <div className="text-xs text-slate-500 mt-1">
+                              One-click authorization for a driver to start work before all required documents are uploaded. Time-limited and auditable.
+                            </div>
+                            <button
+                              onClick={() => openOverrideModal(editTarget)}
+                              className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white rounded-lg px-3 py-1.5 transition-colors"
+                            >
+                              <ShieldAlert size={12} /> Emergency Start
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
                   {/* Required documents */}
                   <div>
                     <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">Required Documents</p>
@@ -943,6 +1054,69 @@ const Drivers: React.FC = () => {
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── EMERGENCY OVERRIDE MODAL ────────────────────────────────────── */}
+      {overrideTarget && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/50" onClick={() => !savingOverride && setOverrideTarget(null)} />
+          <div className="relative z-10 bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+            <div className="flex items-start gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center shrink-0">
+                <ShieldAlert size={20} />
+              </div>
+              <div className="flex-1">
+                <h3 className="font-bold text-slate-800">Grant Emergency Override</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Allow <span className="font-semibold">{overrideTarget.name}</span> to work before all required documents are uploaded. This action is logged.
+                </p>
+              </div>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Reason (required)</label>
+                <textarea
+                  value={overrideReason}
+                  onChange={e => setOverrideReason(e.target.value)}
+                  rows={3}
+                  placeholder="e.g. Urgent coverage needed; insurance renewal in progress, will upload by Friday"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Expires in</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={overrideDays}
+                    onChange={e => setOverrideDays(Number(e.target.value))}
+                    className="w-20 rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  />
+                  <span className="text-sm text-slate-600">day{overrideDays !== 1 ? 's' : ''} from now</span>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">Override auto-expires. Max 30 days.</p>
+              </div>
+            </div>
+            <div className="flex gap-2 mt-5">
+              <button
+                onClick={() => setOverrideTarget(null)}
+                disabled={savingOverride}
+                className="flex-1 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-xl py-2.5 text-sm font-semibold transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={grantOverride}
+                disabled={savingOverride || !overrideReason.trim()}
+                className="flex-1 bg-amber-600 hover:bg-amber-700 text-white rounded-xl py-2.5 text-sm font-semibold inline-flex items-center justify-center gap-2 disabled:opacity-60 transition-colors"
+              >
+                {savingOverride ? <><Loader2 size={14} className="animate-spin" /> Granting…</> : <><ShieldAlert size={14} /> Grant Override</>}
+              </button>
             </div>
           </div>
         </div>

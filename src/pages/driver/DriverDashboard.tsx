@@ -5,12 +5,12 @@ import {
 import { db } from '../../services/firebase';
 import { useAuth } from '../../context/AuthContext';
 import type {
-  RouteAssignment, Booking, Client, Student, RouteLog, StudentEvent, StudentEventType,
+  RouteAssignment, Booking, Client, Student, RouteLog, StudentEvent, StudentEventType, Driver,
 } from '../../types';
 import {
   MapPin, Clock, Calendar, CheckCircle, XCircle,
   UserCheck, UserX, Navigation, PhoneCall, AlertCircle, ChevronDown,
-  ChevronUp, Wifi, WifiOff, FileText, Bell,
+  ChevronUp, Wifi, WifiOff, FileText, Bell, ShieldAlert,
 } from 'lucide-react';
 import { format } from 'date-fns';
 import toast from 'react-hot-toast';
@@ -190,6 +190,7 @@ const DriverDashboard: React.FC = () => {
   const [todayLogs,   setTodayLogs]   = useState<RouteLog[]>([]);
   const [loading,     setLoading]     = useState(true);
   const [linkedId,    setLinkedId]    = useState('');
+  const [driverDoc,   setDriverDoc]   = useState<Driver | null>(null);
   const [expandedRoute,   setExpandedRoute]   = useState<string | null>(null);
   const [savingEvent,     setSavingEvent]     = useState<string | null>(null);
   const [gpsActive,       setGpsActive]       = useState(true);
@@ -232,6 +233,9 @@ const DriverDashboard: React.FC = () => {
         query(collection(db, 'routeAssignments'), where('driverId', '==', id)),
         snap => { if (!cancelled) { setAssignments(snap.docs.map(d => ({ id: d.id, ...d.data() }) as RouteAssignment)); setLoading(false); } }
       ));
+      unsubs.push(onSnapshot(doc(db, 'drivers', id), snap => {
+        if (!cancelled) setDriverDoc(snap.exists() ? ({ id: snap.id, ...snap.data() } as Driver) : null);
+      }));
       unsubs.push(onSnapshot(collection(db, 'bookings'), snap => {
         if (cancelled) return;
         const map: Record<string, Booking> = {};
@@ -530,6 +534,23 @@ const DriverDashboard: React.FC = () => {
           {gpsError} — tap Allow Location if prompted
         </div>
       )}
+
+      {(() => {
+        const ov = driverDoc?.emergencyOverride;
+        if (!ov || !ov.active) return null;
+        const exp = (ov.expiresAt as unknown as { toDate?: () => Date })?.toDate?.();
+        if (!exp || exp.getTime() <= Date.now()) return null;
+        return (
+          <div className="mx-5 mt-2 bg-amber-100 border border-amber-300 rounded-xl px-4 py-3 flex items-start gap-3 text-xs text-amber-900">
+            <ShieldAlert size={16} className="flex-shrink-0 mt-0.5 text-amber-700" />
+            <div className="flex-1 min-w-0">
+              <div className="font-semibold">Emergency authorization active</div>
+              <div className="mt-0.5">You are cleared to drive under an admin-granted override. Please upload your remaining required documents as soon as possible.</div>
+              <div className="mt-1 text-amber-800">Expires {format(exp, 'MMM d, yyyy h:mm a')}</div>
+            </div>
+          </div>
+        );
+      })()}
 
       <div className="px-5 pt-2 pb-5">
         {linkedId && <ShiftControls driverId={linkedId} />}
