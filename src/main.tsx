@@ -9,6 +9,10 @@ import { createRoot } from 'react-dom/client';
 import './index.css';
 import App from './App';
 import { AuthProvider } from './context/AuthContext';
+import { initSentry } from './services/sentry';
+
+// Initialise Sentry before rendering (no-op without VITE_SENTRY_DSN)
+initSentry().catch(() => {});
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

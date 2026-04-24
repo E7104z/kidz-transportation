@@ -30,6 +30,9 @@ import {
   UserPlus,
   Shield,
   RefreshCw,
+  MessageSquare,
+  Eye,
+  Download,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { db } from '../../services/firebase';
@@ -37,6 +40,9 @@ import { computeWeeklyCharge } from '../../utils/pricing';
 import { getMileage } from '../../services/mileageService';
 import { generateAndSaveContract, queueContractEmail } from '../../services/contractService';
 import AddressAutocomplete from '../../components/AddressAutocomplete';
+import CommsLog from '../../components/CommsLog';
+import { useImpersonation } from '../../context/ImpersonationContext';
+import { exportToCSV } from '../../utils/csvExport';
 import type { Client, Student, Booking, Contract, ClientAccess, ContactRole, ContactPermissions, TransportationPurpose } from '../../types';
 import { DEFAULT_PERMISSIONS } from '../../types';
 import { getFunctions, httpsCallable } from 'firebase/functions';
@@ -268,7 +274,7 @@ const AddClientModal: React.FC<AddClientModalProps> = ({ onClose }) => {
   );
 };
 
-type TabId = 'overview' | 'booking' | 'contract' | 'contacts';
+type TabId = 'overview' | 'booking' | 'contract' | 'contacts' | 'comms';
 
 interface ClientDetailPanelProps {
   client: Client; students: Student[]; booking: Booking | null;
@@ -452,11 +458,32 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
     return d ? format(d, 'MMM d, yyyy h:mm a') : '---';
   };
 
+  const { startImpersonation } = useImpersonation();
+  const [impersonating, setImpersonating] = useState(false);
+
+  const handleImpersonate = async () => {
+    setImpersonating(true);
+    try {
+      const usersSnap = await getDocs(query(collection(db, 'users'), where('linkedId', '==', client.id), where('role', '==', 'parent')));
+      if (usersSnap.empty) {
+        toast.error('No linked parent account. Send a portal invite first.');
+        return;
+      }
+      const u = usersSnap.docs[0];
+      startImpersonation({ uid: u.id, name: client.name, role: 'parent', linkedId: client.id });
+      toast.success(`Viewing as ${client.name}`);
+      onClose();
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Failed to start impersonation');
+    } finally { setImpersonating(false); }
+  };
+
   const tabs: { id: TabId; label: string; icon: React.ReactNode }[] = [
     { id: 'overview', label: 'Overview', icon: <Users size={14} /> },
     { id: 'booking', label: 'Booking', icon: <GraduationCap size={14} /> },
     { id: 'contract', label: 'Contract', icon: <FileText size={14} /> },
     { id: 'contacts', label: 'Contacts', icon: <Shield size={14} /> },
+    { id: 'comms', label: 'Comms', icon: <MessageSquare size={14} /> },
   ];
 
   return (
@@ -469,6 +496,14 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
             <p className="text-violet-200 text-xs mt-0.5">{client.email}</p>
           </div>
           <div className="flex items-center gap-2 ml-3">
+            <button
+              onClick={handleImpersonate}
+              disabled={impersonating}
+              title="View portal as this parent (read-only)"
+              className="p-1.5 text-white/70 hover:text-white hover:bg-white/10 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {impersonating ? <Loader2 size={16} className="animate-spin" /> : <Eye size={16} />}
+            </button>
             <button
               onClick={handleSendPortalInvite}
               disabled={sendingInvite || !client.email}
@@ -851,6 +886,10 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
           {activeTab === 'contacts' && (
             <ContactsPanel clientId={client.id} />
           )}
+
+          {activeTab === 'comms' && (
+            <CommsLog clientId={client.id} />
+          )}
         </div>
       </div>
     </>
@@ -1145,7 +1184,33 @@ const Clients: React.FC = () => {
             <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
             <input className="w-full pl-9 pr-4 py-2.5 rounded-xl border border-slate-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 transition" placeholder="Search by name, student, or school..." value={search} onChange={e => setSearch(e.target.value)} />
           </div>
-          <span className="text-xs text-slate-400 whitespace-nowrap">{filtered.length} result{filtered.length !== 1 ? 's' : ''}</span>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-slate-400 whitespace-nowrap">{filtered.length} result{filtered.length !== 1 ? 's' : ''}</span>
+            <button
+              onClick={() => {
+                const rows = filtered.map(c => {
+                  const bk = getClientBooking(c.id);
+                  const sts = getClientStudents(c.id);
+                  return {
+                    name: c.name,
+                    email: c.email,
+                    phone: c.phone ?? '',
+                    address: c.address ?? '',
+                    students: sts.map(s => s.name).join('; '),
+                    schools: sts.map(s => s.schoolName).filter(Boolean).join('; '),
+                    status: bk?.status ?? '',
+                    weeklyRate: bk?.weeklyRate ?? '',
+                  };
+                });
+                exportToCSV(rows, `clients-${new Date().toISOString().slice(0, 10)}`);
+              }}
+              disabled={filtered.length === 0}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              title="Export current list to CSV"
+            >
+              <Download size={13} /> Export CSV
+            </button>
+          </div>
         </div>
         {loading && (
           <div className="space-y-2">

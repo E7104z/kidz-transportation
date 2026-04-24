@@ -5,6 +5,7 @@ import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager
 import { getAuth } from 'firebase/auth';
 import { getStorage } from 'firebase/storage';
 import { getFunctions } from 'firebase/functions';
+import { initializeAppCheck, ReCaptchaV3Provider } from 'firebase/app-check';
 
 // Read configuration from Vite environment variables.
 const firebaseConfig = {
@@ -23,6 +24,23 @@ if (!firebaseConfig.projectId) {
 
 const app = initializeApp(firebaseConfig);
 export { firebaseConfig };
+
+// App Check — protects backend resources from abuse.
+// Set VITE_RECAPTCHA_SITE_KEY in your .env to enable.
+// In local dev without a key, App Check is skipped (backend must be in non-enforcing mode).
+const recaptchaKey = import.meta.env.VITE_RECAPTCHA_SITE_KEY as string | undefined;
+if (recaptchaKey) {
+  if (import.meta.env.DEV && import.meta.env.VITE_APPCHECK_DEBUG_TOKEN) {
+    // Allow CI / local dev to bypass reCAPTCHA without a real site key
+    (self as unknown as Record<string, unknown>).FIREBASE_APPCHECK_DEBUG_TOKEN =
+      import.meta.env.VITE_APPCHECK_DEBUG_TOKEN;
+  }
+  initializeAppCheck(app, {
+    provider: new ReCaptchaV3Provider(recaptchaKey),
+    isTokenAutoRefreshEnabled: true,
+  });
+}
+
 export const db = initializeFirestore(app, {
   localCache: persistentLocalCache({
     tabManager: persistentMultipleTabManager()
@@ -33,3 +51,4 @@ export const storage = getStorage(app);
 export const functions = getFunctions(app);
 
 export default app;
+

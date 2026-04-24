@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { LayoutDashboard, Columns, Users, Car, DollarSign, Upload, Menu, X, LogOut, Radio, Receipt } from 'lucide-react';
+import NotificationBell from './NotificationBell';
+import GlobalSearch from './GlobalSearch';
 import { useAuth } from '../context/AuthContext';
 import logo from '../assets/KIDZ logo4 site.png';
 
@@ -29,6 +31,9 @@ const AdminLayout: React.FC<React.PropsWithChildren> = ({ children }) => {
     <>
       <div className="px-6 py-5 border-b border-white/10 flex items-center justify-center">
         <img src={logo} alt="KIDZ Transportation" className="h-20 w-auto object-contain" />
+      </div>
+      <div className="px-3 pt-3">
+        <GlobalSearch />
       </div>
       <nav className="flex-1 mt-4 px-3">
         {navItems.map(({ to, label, icon: Icon }) => (
@@ -93,6 +98,8 @@ const AdminLayout: React.FC<React.PropsWithChildren> = ({ children }) => {
             <Menu size={22} />
           </button>
           <img src={logo} alt="KIDZ" className="h-8 w-auto" />
+          <div className="flex-1 min-w-0"><GlobalSearch /></div>
+          <NotificationBell colorClass="text-slate-600" />
         </div>
         {children}
       </main>
