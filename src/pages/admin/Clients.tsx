@@ -663,7 +663,7 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
               ) : (
                 <>
                   {!editingBooking ? (
-                    <div className="flex justify-end"><button onClick={() => { setBookingForm({ ...booking }); setWeeklyRateStr((booking.weeklyRate ?? pricing.weekly).toFixed(2)); setDailyRateStr((booking.dailyRate ?? pricing.daily).toFixed(2)); setEditingBooking(true); }} className="inline-flex items-center gap-1.5 text-sm text-violet-600 hover:text-violet-800 font-semibold"><Edit2 size={13} /> Edit Booking</button></div>
+                    <div className="flex justify-end"><button onClick={() => { setBookingForm({ ...booking }); setWeeklyRateStr((booking.weeklyRate || pricing.weekly).toFixed(2)); setDailyRateStr((booking.dailyRate || pricing.daily).toFixed(2)); setEditingBooking(true); }} className="inline-flex items-center gap-1.5 text-sm text-violet-600 hover:text-violet-800 font-semibold"><Edit2 size={13} /> Edit Booking</button></div>
                   ) : (
                     <div className="flex justify-end gap-2">
                       <button onClick={saveBooking} disabled={savingBooking} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white rounded-lg text-sm font-semibold disabled:opacity-60">{savingBooking ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Save</button>
