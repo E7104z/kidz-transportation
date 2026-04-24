@@ -37,3 +37,15 @@ functions/createDriverAccounts.js
 *service-account*.json
 
 .vercel
+
+# Accidental uploads at repo root (driver documents should only live in Firebase Storage)
+/driversLicense_*.jpg
+/driversLicense_*.jpeg
+/driversLicense_*.png
+/insurance_*.pdf
+/insurance_*.jpg
+/registration_*.jpg
+/registration_*.jpeg
+/registration_*.pdf
+/w9_*.pdf
+
