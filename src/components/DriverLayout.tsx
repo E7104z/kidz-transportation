@@ -40,7 +40,19 @@ const DriverLayout: React.FC = () => {
       if (d?.photoURL) setDriverPhotoURL(d.photoURL as string);
       if (d?.name) setDriverName(d.name as string);
       // Admins viewing /driver/* skip onboarding gate.
-      if (role !== 'admin' && d?.onboardingStatus !== 'complete') {
+      // Emergency override also lets a driver skip the onboarding gate until expiresAt.
+      const ov = d?.emergencyOverride as
+        | { active?: boolean; expiresAt?: { toDate?: () => Date } }
+        | undefined;
+      const overrideActive =
+        !!ov?.active &&
+        !!ov?.expiresAt?.toDate &&
+        ov.expiresAt.toDate().getTime() > Date.now();
+      if (
+        role !== 'admin' &&
+        d?.onboardingStatus !== 'complete' &&
+        !overrideActive
+      ) {
         navigate('/driver/onboarding', { replace: true });
         return;
       }
