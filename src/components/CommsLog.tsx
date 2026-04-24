@@ -9,20 +9,26 @@ interface Props {
   clientId: string;
 }
 
-const CHANNEL_ICONS: Record<CommunicationChannel, React.ReactNode> = {
+const CHANNEL_ICONS: Partial<Record<CommunicationChannel, React.ReactNode>> = {
   phone:  <Phone size={13} />,
   email:  <Mail size={13} />,
   sms:    <MessageSquare size={13} />,
   portal: <FileText size={13} />,
   inPerson: <MessageSquare size={13} />,
+  in_app: <MessageSquare size={13} />,
+  admin_note: <FileText size={13} />,
+  sms_legacy: <MessageSquare size={13} />,
 };
 
-const CHANNEL_LABELS: Record<CommunicationChannel, string> = {
+const CHANNEL_LABELS: Partial<Record<CommunicationChannel, string>> = {
   phone:    'Phone',
   email:    'Email',
   sms:      'SMS',
   portal:   'Portal',
   inPerson: 'In Person',
+  in_app:   'In-App',
+  admin_note: 'Admin Note',
+  sms_legacy: 'SMS',
 };
 
 const CommsLog: React.FC<Props> = ({ clientId }) => {

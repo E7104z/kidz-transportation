@@ -9,7 +9,7 @@ function makeSelector(initial: string[] = []) {
     get selected() { return selected; },
     get count() { return selected.size; },
     isSelected(id: string) { return selected.has(id); },
-    toggleOne(id: string, allIds: string[]) {
+    toggleOne(id: string, _allIds: string[]) {
       const next = new Set(selected);
       if (next.has(id)) next.delete(id); else next.add(id);
       selected = next;

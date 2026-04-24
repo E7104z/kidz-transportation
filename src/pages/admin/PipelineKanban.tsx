@@ -151,6 +151,8 @@ const PipelineKanban: React.FC = () => {
     const map: Record<BookingStatus, MergedBooking[]> = {
       new: [],
       under_review: [],
+      dry_run: [],
+      meet_and_greet: [],
       contract_sent: [],
       active: [],
       paused: [],

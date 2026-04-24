@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
-import { db } from '../../services/firebase';
-import { useAuth } from '../../context/AuthContext';
-import type { IncidentType, IncidentSeverity } from '../../types';
+import { db } from '../services/firebase';
+import { useAuth } from '../context/AuthContext';
+import type { IncidentType, IncidentSeverity } from '../types';
 import { AlertTriangle, CheckCircle } from 'lucide-react';
 
 interface Props {
