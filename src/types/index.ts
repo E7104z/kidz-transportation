@@ -322,6 +322,7 @@ export type NotificationType =
   | 'student_dropped_off'
   | 'route_missed'
   | 'route_delayed'
+  | 'route_update'
   | 'invoice_sent'
   | 'invoice_overdue'
   | 'invoice_paid'
@@ -424,7 +425,15 @@ export interface Incident {
 // Client communications log
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type CommunicationChannel = 'email' | 'in_app' | 'phone' | 'admin_note' | 'sms_legacy';
+export type CommunicationChannel =
+  | 'email'
+  | 'in_app'
+  | 'phone'
+  | 'admin_note'
+  | 'sms_legacy'
+  | 'sms'
+  | 'portal'
+  | 'inPerson';
 export type CommunicationDirection = 'inbound' | 'outbound' | 'internal';
 
 export interface ClientCommunication {
@@ -436,6 +445,8 @@ export interface ClientCommunication {
   body: string;
   actorUid?: string;
   actorName?: string;
+  loggedByUid?: string;
+  loggedByName?: string;
   relatedBookingId?: string;
   relatedInvoiceId?: string;
   relatedContractId?: string;

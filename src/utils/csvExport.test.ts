@@ -12,7 +12,6 @@ describe('exportToCSV', () => {
     const origCreate = URL.createObjectURL;
     URL.createObjectURL = (b: Blob) => { blobs.push(b); return 'blob:test'; };
     URL.revokeObjectURL = () => {};
-    const originalBody = global.document?.body;
 
     // Minimal DOM shim for the download link
     const appendedElements: HTMLElement[] = [];
