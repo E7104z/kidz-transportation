@@ -14,6 +14,7 @@ import Dispatch from './pages/admin/Dispatch';
 import AdminBilling from './pages/admin/AdminBilling';
 import DriverDashboard from './pages/driver/DriverDashboard';
 import DriverSetup from './pages/driver/DriverSetup';
+import AcceptDriverInvite from './pages/driver/AcceptDriverInvite';
 import DriverOnboarding from './pages/driver/DriverOnboarding';
 import DriverProfile from './pages/driver/DriverProfile';
 import DriverHistory from './pages/driver/DriverHistory';
@@ -44,6 +45,7 @@ function App() {
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/driver/setup" element={<DriverSetup />} />
+          <Route path="/driver/accept-invite" element={<AcceptDriverInvite />} />
           <Route
             path="/driver/onboarding"
             element={

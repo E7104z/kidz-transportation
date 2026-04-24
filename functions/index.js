@@ -944,6 +944,110 @@ exports.createManualInvoice = functions.https.onCall(async (data, context) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: sendDriverInvite                                    (admin only)
+// Generates a secure one-time token, stores it on the driver doc, and sends
+// an invite email via the emailQueue so the driver can self-register.
+// Payload: { driverId: string }
+// Returns: { success: true }
+// ─────────────────────────────────────────────────────────────────────────────
+exports.sendDriverInvite = functions.https.onCall(async (data, context) => {
+  await assertAdmin(context);
+
+  const { driverId } = data;
+  if (!driverId || typeof driverId !== 'string') {
+    throw new functions.https.HttpsError('invalid-argument', 'driverId is required.');
+  }
+
+  const db = admin.firestore();
+  const driverRef = db.collection('drivers').doc(driverId);
+  const driverSnap = await driverRef.get();
+
+  if (!driverSnap.exists) {
+    throw new functions.https.HttpsError('not-found', 'Driver not found.');
+  }
+
+  const driverData = driverSnap.data();
+
+  if (!driverData.email) {
+    throw new functions.https.HttpsError('failed-precondition', 'Driver has no email address. Add one before sending an invite.');
+  }
+  if (driverData.uid) {
+    throw new functions.https.HttpsError('already-exists', 'This driver already has a linked account.');
+  }
+
+  const token = crypto.randomBytes(32).toString('hex');
+  const expiry = admin.firestore.Timestamp.fromMillis(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+  await driverRef.update({ inviteToken: token, inviteTokenExpiry: expiry });
+
+  const baseUrl = 'https://kidz-transportation.com';
+  const inviteUrl = `${baseUrl}/driver/accept-invite?token=${token}`;
+
+  await db.collection('emailQueue').add({
+    to: driverData.email,
+    subject: 'Your KIDZ Transportation Driver Account Invitation',
+    body: `
+      <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;">
+        <h2 style="color:#0f766e;margin-top:0;">Welcome to KIDZ Transportation</h2>
+        <p>Hi ${driverData.name || 'there'},</p>
+        <p>You've been invited to join as a driver. Click the button below to set up your account password and complete onboarding.</p>
+        <p style="text-align:center;margin:32px 0;">
+          <a href="${inviteUrl}"
+             style="background:#0f766e;color:#ffffff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;">
+            Set Up My Account
+          </a>
+        </p>
+        <p style="color:#64748b;font-size:13px;">This link expires in 7 days. If you did not expect this email, you can safely ignore it.</p>
+        <p style="color:#64748b;font-size:13px;">Or copy this link:<br><a href="${inviteUrl}" style="color:#0f766e;">${inviteUrl}</a></p>
+      </div>
+    `,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  return { success: true };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: validateDriverInvite                                    (public)
+// Validates an invite token without requiring authentication.
+// Payload: { token: string }
+// Returns: { valid: true, driverId, driverName, email }
+//        | { valid: false, reason: string }
+// ─────────────────────────────────────────────────────────────────────────────
+exports.validateDriverInvite = functions.https.onCall(async (data, _context) => {
+  const { token } = data;
+
+  if (!token || typeof token !== 'string' || token.length < 16) {
+    return { valid: false, reason: 'invalid_token' };
+  }
+
+  const db = admin.firestore();
+  const snap = await db.collection('drivers')
+    .where('inviteToken', '==', token)
+    .limit(1)
+    .get();
+
+  if (snap.empty) return { valid: false, reason: 'not_found' };
+
+  const driverDoc = snap.docs[0];
+  const d = driverDoc.data();
+
+  if (d.uid) return { valid: false, reason: 'already_linked' };
+
+  const expiry = d.inviteTokenExpiry;
+  if (!expiry || expiry.toMillis() < Date.now()) {
+    return { valid: false, reason: 'expired' };
+  }
+
+  return {
+    valid: true,
+    driverId: driverDoc.id,
+    driverName: d.name || '',
+    email: d.email || '',
+  };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // TRIGGER: processEmailQueue
 // Fires when a new document is created in the `emailQueue` collection.
 // Sends an email via SendGrid (or any HTTP-based email API).

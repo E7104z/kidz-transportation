@@ -4,7 +4,8 @@ import { ref, uploadBytes, getDownloadURL, uploadBytesResumable } from 'firebase
 import { db, storage } from '../../services/firebase';
 import { useAuth } from '../../context/AuthContext';
 import type { Driver, DriverDocument, RouteAssignment, Booking, Client, Student } from '../../types';
-import { Car, Mail, Phone, Plus, X, Check, Link as LinkIcon, MapPin, Clock, Trash2, AlertTriangle, Pencil, Camera, User as UserIcon, FileText, UploadCloud, ExternalLink, Download, Loader2, ShieldAlert, ShieldOff } from 'lucide-react';
+import { getFunctions, httpsCallable } from 'firebase/functions';
+import { Car, Mail, Phone, Plus, X, Check, Link as LinkIcon, MapPin, Clock, Trash2, AlertTriangle, Pencil, Camera, User as UserIcon, FileText, UploadCloud, ExternalLink, Download, Loader2, ShieldAlert, ShieldOff, Send } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 interface DriverForm {
@@ -80,6 +81,9 @@ const Drivers: React.FC = () => {
   const [additionalUploading, setAdditionalUploading] = useState(false);
   const additionalFileRef = useRef<HTMLInputElement>(null);
 
+  // Invite state
+  const [sendingInvite, setSendingInvite] = useState<string | null>(null);
+
   useEffect(() => {
     let count = 0;
     const done = () => { count++; if (count >= 5) setLoading(false); };
@@ -109,6 +113,28 @@ const Drivers: React.FC = () => {
     });
     return () => { u1(); u2(); u3(); u4(); u5(); };
   }, []);
+
+  const handleSendInvite = async (driverId: string) => {
+    setSendingInvite(driverId);
+    try {
+      const fn = httpsCallable<{ driverId: string }, { success: boolean }>(
+        getFunctions(), 'sendDriverInvite'
+      );
+      await fn({ driverId });
+      toast.success('Invite email sent!');
+    } catch (err: unknown) {
+      const msg = (err as { message?: string })?.message ?? '';
+      if (msg.includes('already-exists')) {
+        toast.error('This driver already has a linked account.');
+      } else if (msg.includes('failed-precondition')) {
+        toast.error('Add an email address to this driver first.');
+      } else {
+        toast.error('Failed to send invite. Please try again.');
+      }
+    } finally {
+      setSendingInvite(null);
+    }
+  };
 
   const addDriver = async () => {
     if (!form.name.trim()) return;
@@ -654,6 +680,19 @@ const Drivers: React.FC = () => {
                           <LinkIcon size={13} />
                           Assign Route
                         </button>
+                        {!d.uid && (
+                          <button
+                            onClick={() => handleSendInvite(d.id)}
+                            disabled={sendingInvite === d.id}
+                            title="Send account invite to driver"
+                            className="flex items-center gap-1.5 border border-teal-200 bg-teal-50 text-teal-700 hover:bg-teal-100 rounded-xl px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-60"
+                          >
+                            {sendingInvite === d.id
+                              ? <div className="w-3 h-3 border border-teal-600 border-t-transparent rounded-full animate-spin" />
+                              : <Send size={12} />}
+                            {sendingInvite === d.id ? 'Sending…' : 'Invite'}
+                          </button>
+                        )}
                         <button
                           onClick={() => setConfirmDeleteDriver(d.id)}
                           className="p-2 border border-slate-200 text-slate-400 hover:text-red-500 hover:border-red-200 hover:bg-red-50 rounded-xl transition-colors"
