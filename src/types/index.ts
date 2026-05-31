@@ -128,6 +128,11 @@ export interface Driver {
     expiresAt: Timestamp;
     reason: string;
   };
+  // Contractor fields
+  address?: string;
+  payoutSplit?: number;           // percentage the driver earns, e.g. 70 for 70%
+  status?: 'pending' | 'active' | 'inactive' | 'suspended';
+  latestDriverContractId?: string;
 }
 
 export type RouteAssignmentStatus = 'pending' | 'paid';
@@ -168,6 +173,27 @@ export interface Contract {
   signedByEmail?: string;         // email we sent the contract to (audit)
   signerIp?: string;              // request IP captured server-side
   signedPdfUrl?: string;          // PDF with signature baked in
+}
+
+export interface DriverContract {
+  id: string;
+  driverId: string;
+  driverName: string;
+  driverEmail: string;
+  driverPhone: string;
+  driverAddress: string;
+  payoutSplit: number;        // e.g. 70 for 70%
+  generatedAt: Timestamp;
+  sentAt: Timestamp | null;
+  pdfUrl: string;
+  emailedTo: string;
+  // ── Online signature ──────────────────────────────────────────────
+  signingToken?: string;
+  signedAt?: Timestamp | null;
+  signedByName?: string;
+  signedByEmail?: string;
+  signerIp?: string;
+  signedPdfUrl?: string;
 }
 
 export interface EmailQueueItem {

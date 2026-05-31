@@ -3,15 +3,20 @@ import { collection, onSnapshot, addDoc, deleteDoc, doc, getDoc, updateDoc, serv
 import { ref, uploadBytes, getDownloadURL, uploadBytesResumable } from 'firebase/storage';
 import { db, storage } from '../../services/firebase';
 import { useAuth } from '../../context/AuthContext';
-import type { Driver, DriverDocument, RouteAssignment, Booking, Client, Student } from '../../types';
+import type { Driver, DriverDocument, DriverContract, RouteAssignment, Booking, Client, Student } from '../../types';
 import { getFunctions, httpsCallable } from 'firebase/functions';
-import { Car, Mail, Phone, Plus, X, Check, Link as LinkIcon, MapPin, Clock, Trash2, AlertTriangle, Pencil, Camera, User as UserIcon, FileText, UploadCloud, ExternalLink, Download, Loader2, ShieldAlert, ShieldOff, Send } from 'lucide-react';
+import { format } from 'date-fns';
+import { Car, Mail, Phone, Plus, X, Check, CheckCircle, Link as LinkIcon, MapPin, Clock, Trash2, AlertTriangle, Pencil, Camera, User as UserIcon, FileText, UploadCloud, ExternalLink, Download, Loader2, ShieldAlert, ShieldOff, Send, FileSignature, Copy } from 'lucide-react';
+import AddressAutocomplete from '../../components/AddressAutocomplete';
 import toast from 'react-hot-toast';
+import { generateAndSaveDriverContract, queueDriverContractEmail } from '../../services/driverContractService';
 
 interface DriverForm {
   name: string;
   email: string;
   phone: string;
+  address: string;
+  payoutSplit: number;
 }
 
 function getWeekStart(): Date {
@@ -42,7 +47,7 @@ const Drivers: React.FC = () => {
   const [students, setStudents] = useState<Record<string, Student>>({});
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
-  const [form, setForm] = useState<DriverForm>({ name: '', email: '', phone: '' });
+  const [form, setForm] = useState<DriverForm>({ name: '', email: '', phone: '', address: '', payoutSplit: 70 });
   const [saving, setSaving] = useState(false);
   const [assignTarget, setAssignTarget] = useState<Driver | null>(null);
   const [assigning, setAssigning] = useState(false);
@@ -60,12 +65,21 @@ const Drivers: React.FC = () => {
 
   // Edit driver state
   const [editTarget, setEditTarget]   = useState<Driver | null>(null);
-  const [editForm,   setEditForm]     = useState<DriverForm>({ name: '', email: '', phone: '' });
-  const [editTab,    setEditTab]      = useState<'info' | 'documents'>('info');
+  const [editForm,   setEditForm]     = useState<DriverForm>({ name: '', email: '', phone: '', address: '', payoutSplit: 70 });
+  const [editTab,    setEditTab]      = useState<'info' | 'documents' | 'contract'>('info');
+
+  // Driver contract state
+  const [driverContracts, setDriverContracts] = useState<DriverContract[]>([]);
+  const [contractsLoading, setContractsLoading] = useState(false);
+  const [generatingContract, setGeneratingContract] = useState(false);
+  const [sendingContractEmail, setSendingContractEmail] = useState(false);
   const [savingEdit, setSavingEdit]   = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [editPhotoURL, setEditPhotoURL] = useState<string | null>(null);
   const editFileRef = useRef<HTMLInputElement>(null);
+
+  // Stripe Connect state
+  const [connectLoading, setConnectLoading] = useState(false);
 
   // Per-doc upload state for the Documents tab
   type RequiredDocKey = 'driversLicense' | 'insurance' | 'registration' | 'w9';
@@ -140,7 +154,7 @@ const Drivers: React.FC = () => {
     if (!form.name.trim()) return;
     setSaving(true);
     await addDoc(collection(db, 'drivers'), { ...form, uid: '', createdAt: serverTimestamp() });
-    setForm({ name: '', email: '', phone: '' });
+    setForm({ name: '', email: '', phone: '', address: '', payoutSplit: 70 });
     setShowAdd(false);
     setSaving(false);
   };
@@ -179,10 +193,26 @@ const Drivers: React.FC = () => {
   // Assignments belonging to a specific driver (with resolved booking).
   // Orphan assignments (driver already deleted) are intentionally excluded
   // from the per-driver list below because we resolve by real driver ID.
-  const getDriverAssignments = (driverId: string) =>
-    assignments
-      .filter(a => a.driverId === driverId)
+  const getDriverAssignments = (driverId: string) => {
+    // Deduplicate by bookingId — keep only the most recent assignment per booking
+    // so old weekly docs don't create duplicate route rows on the driver card.
+    const all = assignments.filter(a => a.driverId === driverId);
+    const deduped = new Map<string, RouteAssignment>();
+    all.forEach(a => {
+      const existing = deduped.get(a.bookingId);
+      if (!existing) {
+        deduped.set(a.bookingId, a);
+      } else {
+        const tExisting = existing.weekStart && typeof (existing.weekStart as any).toDate === 'function'
+          ? (existing.weekStart as any).toDate().getTime() : 0;
+        const tNew = a.weekStart && typeof (a.weekStart as any).toDate === 'function'
+          ? (a.weekStart as any).toDate().getTime() : 0;
+        if (tNew > tExisting) deduped.set(a.bookingId, a);
+      }
+    });
+    return Array.from(deduped.values())
       .map(a => ({ assignment: a, booking: bookings.find(b => b.id === a.bookingId) }));
+  };
 
   const cleanupOrphanAssignments = async () => {
     if (orphanAssignments.length === 0) return;
@@ -215,7 +245,7 @@ const Drivers: React.FC = () => {
         bookingId: booking.id,
         weekStart: getWeekStart(),
         daysWorked: booking.daysOfWeek,
-        weeklyPayout: (booking.weeklyRate || 0) * 0.70,
+        weeklyPayout: (booking.weeklyRate || 0) * ((assignTarget.payoutSplit ?? 70) / 100),
         status: 'pending',
         paidDate: null,
         createdAt: serverTimestamp(),
@@ -243,9 +273,10 @@ const Drivers: React.FC = () => {
 
   const openEdit = async (d: Driver) => {
     setEditTarget(d);
-    setEditForm({ name: d.name || '', email: d.email || '', phone: d.phone || '' });
+    setEditForm({ name: d.name || '', email: d.email || '', phone: d.phone || '', address: d.address || '', payoutSplit: d.payoutSplit ?? 70 });
     setEditPhotoURL(d.photoURL || null);
     setEditTab('info');
+    setDriverContracts([]);
     setDocUploading({});
     setDocProgress({});
 
@@ -272,9 +303,10 @@ const Drivers: React.FC = () => {
 
   const closeEdit = () => {
     setEditTarget(null);
-    setEditForm({ name: '', email: '', phone: '' });
+    setEditForm({ name: '', email: '', phone: '', address: '', payoutSplit: 70 });
     setEditPhotoURL(null);
     setEditTab('info');
+    setDriverContracts([]);
     if (editFileRef.current) editFileRef.current.value = '';
   };
 
@@ -409,13 +441,99 @@ const Drivers: React.FC = () => {
     setSavingEdit(true);
     try {
       await updateDoc(doc(db, 'drivers', editTarget.id), {
-        name:  editForm.name.trim(),
-        email: editForm.email.trim(),
-        phone: editForm.phone.trim(),
+        name:        editForm.name.trim(),
+        email:       editForm.email.trim(),
+        phone:       editForm.phone.trim(),
+        address:     editForm.address.trim(),
+        payoutSplit: Number(editForm.payoutSplit) || 70,
       });
       closeEdit();
     } finally {
       setSavingEdit(false);
+    }
+  };
+
+  const handleStripeConnect = async (driverId: string) => {
+    setConnectLoading(true);
+    try {
+      const fn = httpsCallable(getFunctions(), 'createConnectOnboardingLink');
+      const result = await fn({ driverId });
+      const { url } = result.data as { url: string };
+      window.open(url, '_blank', 'noopener,noreferrer');
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Failed to create onboarding link');
+    } finally {
+      setConnectLoading(false);
+    }
+  };
+
+  const loadDriverContracts = async (driverId: string) => {
+    setContractsLoading(true);
+    try {
+      const snap = await getDocs(
+        query(collection(db, 'driverContracts'), where('driverId', '==', driverId))
+      );
+      const contracts = snap.docs
+        .map(d => ({ id: d.id, ...d.data() }) as DriverContract)
+        .sort((a, b) => {
+          const ta = (a.generatedAt as any)?.toMillis?.() ?? 0;
+          const tb = (b.generatedAt as any)?.toMillis?.() ?? 0;
+          return tb - ta;
+        });
+      setDriverContracts(contracts);
+    } finally {
+      setContractsLoading(false);
+    }
+  };
+
+  const handleGenerateDriverContract = async () => {
+    if (!editTarget) return;
+    if (!editForm.payoutSplit || editForm.payoutSplit < 1 || editForm.payoutSplit > 99) {
+      toast.error('Set a valid payout split (1–99%) before generating a contract.');
+      return;
+    }
+    // Save the payout split first so the PDF uses the latest value
+    await updateDoc(doc(db, 'drivers', editTarget.id), { payoutSplit: Number(editForm.payoutSplit) });
+    const driverWithLatest: Driver = { ...editTarget, payoutSplit: Number(editForm.payoutSplit), address: editForm.address.trim() };
+    setGeneratingContract(true);
+    try {
+      const { contractId, pdfUrl, signingToken } = await generateAndSaveDriverContract(driverWithLatest);
+      const newContract: DriverContract = {
+        id: contractId,
+        driverId: editTarget.id,
+        driverName: editTarget.name,
+        driverEmail: editTarget.email,
+        driverPhone: editTarget.phone || '',
+        driverAddress: editForm.address.trim(),
+        payoutSplit: Number(editForm.payoutSplit),
+        generatedAt: { toMillis: () => Date.now() } as any,
+        sentAt: null,
+        pdfUrl,
+        emailedTo: editTarget.email,
+        signingToken,
+      };
+      setDriverContracts(prev => [newContract, ...prev]);
+      toast.success('Contract generated — use "Email to Driver" to send it.');
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Failed to generate contract.');
+    } finally {
+      setGeneratingContract(false);
+    }
+  };
+
+  const handleSendDriverContractEmail = async (contract: DriverContract) => {
+    if (!editTarget) return;
+    setSendingContractEmail(true);
+    try {
+      await queueDriverContractEmail(contract, editTarget.email, editTarget.name.split(' ')[0] || editTarget.name);
+      setDriverContracts(prev =>
+        prev.map(c => c.id === contract.id ? { ...c, sentAt: { toMillis: () => Date.now() } as any } : c)
+      );
+      toast.success('Contract email queued for delivery ✓');
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Failed to queue email.');
+    } finally {
+      setSendingContractEmail(false);
     }
   };
 
@@ -627,7 +745,7 @@ const Drivers: React.FC = () => {
                                 ))}
                               </select>
                               <span className="text-xs font-bold text-emerald-600">
-                                ${(assignment.weeklyPayout || 0).toFixed(0)}/wk
+                                ${(booking?.weeklyRate || 0).toFixed(0)}/wk
                               </span>
                               <button
                                 onClick={() => unassignRoute(assignment.id)}
@@ -683,9 +801,9 @@ const Drivers: React.FC = () => {
                         {!d.uid && (
                           <button
                             onClick={() => handleSendInvite(d.id)}
-                            disabled={sendingInvite === d.id}
-                            title="Send account invite to driver"
-                            className="flex items-center gap-1.5 border border-teal-200 bg-teal-50 text-teal-700 hover:bg-teal-100 rounded-xl px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-60"
+                            disabled={sendingInvite === d.id || !d.email?.trim()}
+                            title={!d.email?.trim() ? 'Add an email address to this driver first' : 'Send account invite to driver'}
+                            className="flex items-center gap-1.5 border border-teal-200 bg-teal-50 text-teal-700 hover:bg-teal-100 rounded-xl px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
                           >
                             {sendingInvite === d.id
                               ? <div className="w-3 h-3 border border-teal-600 border-t-transparent rounded-full animate-spin" />
@@ -738,6 +856,15 @@ const Drivers: React.FC = () => {
                   />
                 </div>
               ))}
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Address</label>
+                <AddressAutocomplete
+                  value={form.address}
+                  onChange={v => setForm(f => ({ ...f, address: v }))}
+                  placeholder="123 Main St, St. Louis, MO 63101"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 transition"
+                />
+              </div>
             </div>
             <button
               onClick={addDriver}
@@ -813,7 +940,7 @@ const Drivers: React.FC = () => {
                           </div>
                           <div className="text-right shrink-0">
                             <div className="text-sm font-bold text-emerald-600">${(b.weeklyRate || 0).toFixed(0)}/wk</div>
-                            <div className="text-xs text-slate-400">Driver: ${((b.weeklyRate || 0) * 0.75).toFixed(0)}</div>
+                            <div className="text-xs text-slate-400">Driver: ${((b.weeklyRate || 0) * 0.70).toFixed(0)}</div>
                           </div>
                         </div>
                       </button>
@@ -840,17 +967,22 @@ const Drivers: React.FC = () => {
 
             {/* Tabs */}
             <div className="flex border-b border-slate-100 px-6">
-              {(['info', 'documents'] as const).map(t => (
+              {(['info', 'documents', 'contract'] as const).map(t => (
                 <button
                   key={t}
-                  onClick={() => setEditTab(t)}
+                  onClick={() => {
+                    setEditTab(t);
+                    if (t === 'contract' && editTarget && driverContracts.length === 0) {
+                      loadDriverContracts(editTarget.id);
+                    }
+                  }}
                   className={`py-3 px-4 text-sm font-semibold border-b-2 -mb-px transition-colors ${
                     editTab === t
                       ? 'border-teal-500 text-teal-700'
                       : 'border-transparent text-slate-400 hover:text-slate-700'
                   }`}
                 >
-                  {t === 'info' ? 'Info' : 'Documents'}
+                  {t === 'info' ? 'Info' : t === 'documents' ? 'Documents' : 'Contract'}
                 </button>
               ))}
             </div>
@@ -903,12 +1035,84 @@ const Drivers: React.FC = () => {
                         <input
                           type={type}
                           placeholder={placeholder}
-                          value={editForm[key as keyof DriverForm]}
+                          value={editForm[key as keyof DriverForm] as string}
                           onChange={e => setEditForm(f => ({ ...f, [key]: e.target.value }))}
                           className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 transition"
                         />
                       </div>
                     ))}
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Address</label>
+                      <AddressAutocomplete
+                        value={editForm.address}
+                        onChange={v => setEditForm(f => ({ ...f, address: v }))}
+                        placeholder="123 Main St, St. Louis, MO 63101"
+                        className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 transition"
+                      />
+                    </div>
+
+                    {/* Payout split */}
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
+                        Payout Split (%) — driver's share
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min={1}
+                          max={99}
+                          placeholder="70"
+                          value={editForm.payoutSplit}
+                          onChange={e => setEditForm(f => ({ ...f, payoutSplit: Number(e.target.value) }))}
+                          className="w-28 rounded-xl border border-slate-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 transition"
+                        />
+                        <span className="text-sm text-slate-500">% to driver / {100 - (Number(editForm.payoutSplit) || 0)}% to company</span>
+                      </div>
+                      <p className="text-xs text-slate-400 mt-1">Must be set before generating a contract.</p>
+                    </div>
+
+                    {/* Stripe Connect */}
+                    <div className="rounded-xl border border-slate-200 p-4 bg-slate-50">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-semibold text-slate-700 mb-1 flex items-center gap-2">
+                            Stripe Payouts
+                            {editTarget.stripeConnectPayoutsEnabled ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-100 text-emerald-700 text-xs font-bold rounded-full">
+                                <CheckCircle size={10} /> Active
+                              </span>
+                            ) : editTarget.stripeConnectOnboarded ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-100 text-amber-700 text-xs font-bold rounded-full">
+                                Pending review
+                              </span>
+                            ) : editTarget.stripeConnectAccountId ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-100 text-amber-700 text-xs font-bold rounded-full">
+                                Incomplete
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-slate-200 text-slate-500 text-xs font-bold rounded-full">
+                                Not set up
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-slate-500">
+                            {editTarget.stripeConnectPayoutsEnabled
+                              ? 'Driver can receive direct bank payouts via Stripe.'
+                              : 'Send the driver a secure link to connect their bank account.'}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => handleStripeConnect(editTarget.id)}
+                          disabled={connectLoading}
+                          className="flex-shrink-0 flex items-center gap-1.5 text-xs font-semibold bg-violet-600 hover:bg-violet-700 text-white px-3 py-2 rounded-lg transition-colors disabled:opacity-60"
+                        >
+                          {connectLoading
+                            ? <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                            : <ExternalLink size={11} />}
+                          {editTarget.stripeConnectAccountId ? 'Re-send Link' : 'Set Up Payouts'}
+                        </button>
+                      </div>
+                    </div>
                   </div>
 
                   {editTarget.uid && editForm.email.trim().toLowerCase() !== (editTarget.email || '').toLowerCase() && (
@@ -1091,6 +1295,138 @@ const Drivers: React.FC = () => {
                         : <><UploadCloud size={13} /> Upload Additional Document</>}
                     </button>
                   </div>
+                </div>
+              )}
+
+              {/* ── CONTRACT TAB ───────────────────────────────────────────── */}
+              {editTab === 'contract' && editTarget && (
+                <div className="space-y-5">
+                  {/* Pre-flight checklist */}
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-2 text-sm">
+                    <p className="font-semibold text-slate-700 mb-3 text-xs uppercase tracking-wide">Before generating a contract:</p>
+                    {[
+                      { label: 'Driver name', ok: !!editTarget.name },
+                      { label: 'Driver email', ok: !!editTarget.email },
+                      { label: 'Driver address', ok: !!editForm.address.trim() },
+                      { label: 'Payout split set (1–99%)', ok: Number(editForm.payoutSplit) >= 1 && Number(editForm.payoutSplit) <= 99 },
+                    ].map(({ label, ok }) => (
+                      <div key={label} className="flex items-center gap-2">
+                        {ok
+                          ? <Check size={14} className="text-green-600 shrink-0" />
+                          : <X size={14} className="text-red-400 shrink-0" />}
+                        <span className={ok ? 'text-slate-700' : 'text-red-500'}>{label}</span>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Generate button */}
+                  <button
+                    onClick={handleGenerateDriverContract}
+                    disabled={
+                      generatingContract ||
+                      !editTarget.name ||
+                      !editTarget.email ||
+                      !editForm.address.trim() ||
+                      Number(editForm.payoutSplit) < 1 ||
+                      Number(editForm.payoutSplit) > 99
+                    }
+                    className="w-full inline-flex items-center justify-center gap-2 bg-teal-600 hover:bg-teal-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-semibold rounded-xl py-2.5 text-sm transition-colors"
+                  >
+                    {generatingContract
+                      ? <><Loader2 size={15} className="animate-spin" /> Generating…</>
+                      : <><FileSignature size={15} /> Generate Contractor Agreement</>}
+                  </button>
+
+                  {/* Contract history */}
+                  {contractsLoading && (
+                    <div className="flex items-center justify-center py-6 text-slate-400">
+                      <Loader2 size={20} className="animate-spin mr-2" /> Loading contracts…
+                    </div>
+                  )}
+
+                  {!contractsLoading && driverContracts.length === 0 && (
+                    <p className="text-sm text-slate-400 text-center py-4">No contracts generated yet.</p>
+                  )}
+
+                  {driverContracts.map(contract => {
+                    const isSigned = !!contract.signedAt;
+                    const signingUrl = `${window.location.origin}/driver-sign/${contract.id}?t=${contract.signingToken ?? ''}`;
+                    const generatedMs = (contract.generatedAt as any)?.toMillis?.() ?? 0;
+                    const sentMs = (contract.sentAt as any)?.toMillis?.() ?? 0;
+                    return (
+                      <div key={contract.id} className="border border-slate-200 rounded-xl p-4 space-y-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <FileText size={14} className="text-teal-600" />
+                              <span className="text-sm font-semibold text-slate-800">
+                                {contract.payoutSplit}% agreement
+                              </span>
+                              {isSigned
+                                ? <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-semibold">Signed</span>
+                                : <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-semibold">Pending</span>}
+                            </div>
+                            <div className="text-xs text-slate-400 mt-0.5">
+                              Generated {generatedMs ? format(new Date(generatedMs), 'MMM d, yyyy h:mm a') : '—'}
+                            </div>
+                            {isSigned && contract.signedByName && (
+                              <div className="text-xs text-green-700 mt-0.5">
+                                Signed by {contract.signedByName}
+                                {(contract.signedAt as any)?.toMillis?.()
+                                  ? ` on ${format(new Date((contract.signedAt as any).toMillis()), 'MMM d, yyyy')}`
+                                  : ''}
+                              </div>
+                            )}
+                          </div>
+                          <a
+                            href={contract.signedPdfUrl || contract.pdfUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-teal-700 border border-slate-200 hover:border-teal-300 rounded-lg px-2 py-1 transition-colors"
+                          >
+                            <Download size={11} /> PDF
+                          </a>
+                        </div>
+
+                        {!isSigned && (
+                          <>
+                            {/* Copy signing link */}
+                            {contract.signingToken && (
+                              <div className="flex items-center gap-2">
+                                <input
+                                  readOnly
+                                  value={signingUrl}
+                                  className="flex-1 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-slate-50 truncate"
+                                />
+                                <button
+                                  onClick={() => { navigator.clipboard.writeText(signingUrl); toast.success('Signing link copied!'); }}
+                                  className="shrink-0 inline-flex items-center gap-1 text-xs border border-slate-200 hover:bg-slate-100 rounded-lg px-2 py-1.5 transition-colors"
+                                >
+                                  <Copy size={11} /> Copy
+                                </button>
+                              </div>
+                            )}
+
+                            {/* Email button */}
+                            <button
+                              onClick={() => handleSendDriverContractEmail(contract)}
+                              disabled={sendingContractEmail}
+                              className="w-full inline-flex items-center justify-center gap-2 border border-teal-300 text-teal-700 hover:bg-teal-50 disabled:opacity-50 rounded-xl py-2 text-sm font-semibold transition-colors"
+                            >
+                              {sendingContractEmail
+                                ? <><Loader2 size={13} className="animate-spin" /> Sending…</>
+                                : <><Send size={13} /> {sentMs ? 'Resend to Driver' : 'Email to Driver'}</>}
+                            </button>
+                            {sentMs > 0 && (
+                              <p className="text-xs text-slate-400 text-center">
+                                Last sent {format(new Date(sentMs), 'MMM d, yyyy h:mm a')}
+                              </p>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

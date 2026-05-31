@@ -83,11 +83,12 @@ export function useParentData(): ParentData {
         console.warn('[useParentData] clientAccess lookup failed:', err);
       }
 
-      // Client record
-      const clientSnap = await getDoc(doc(db, 'clients', linkedId));
-      if (clientSnap.exists()) {
-        setClient({ id: clientSnap.id, ...clientSnap.data() } as Client);
-      }
+      // Client record — live subscription so autoPay / paymentMethod changes
+      // reflect immediately without a page refresh.
+      unsubs.push(onSnapshot(doc(db, 'clients', linkedId), snap => {
+        if (cancelled) return;
+        if (snap.exists()) setClient({ id: snap.id, ...snap.data() } as Client);
+      }));
 
       // Bookings
       unsubs.push(onSnapshot(

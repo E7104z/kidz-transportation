@@ -350,7 +350,20 @@ const ClientDetailPanel: React.FC<ClientDetailPanelProps> = ({ client, students,
   const saveBooking = async () => {
     if (!booking) return;
     setSavingBooking(true);
-    try { await updateDoc(doc(db, 'bookings', booking.id), { ...bookingForm, weeklyRate: bookingForm.weeklyRate ?? pricing.weekly, dailyRate: bookingForm.dailyRate ?? pricing.daily, updatedAt: serverTimestamp() }); toast.success('Booking updated'); setEditingBooking(false); }
+    try {
+      const newWeeklyRate = bookingForm.weeklyRate ?? pricing.weekly;
+      await updateDoc(doc(db, 'bookings', booking.id), { ...bookingForm, weeklyRate: newWeeklyRate, dailyRate: bookingForm.dailyRate ?? pricing.daily, updatedAt: serverTimestamp() });
+      // Keep routeAssignment.weeklyPayout in sync so the driver page always
+      // reflects the same rate shown on the client page.
+      const assignSnap = await getDocs(query(collection(db, 'routeAssignments'), where('bookingId', '==', booking.id)));
+      if (!assignSnap.empty) {
+        const batch = writeBatch(db);
+        assignSnap.docs.forEach(d => batch.update(d.ref, { weeklyPayout: Math.round(newWeeklyRate * 0.70 * 100) / 100 }));
+        await batch.commit();
+      }
+      toast.success('Booking updated');
+      setEditingBooking(false);
+    }
     catch { toast.error('Failed to save booking'); } finally { setSavingBooking(false); }
   };
 

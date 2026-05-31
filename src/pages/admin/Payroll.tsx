@@ -12,8 +12,9 @@ import {
 } from 'date-fns';
 import {
   DollarSign, CheckCircle, Check, ChevronLeft, ChevronRight, Printer,
-  TrendingUp, TrendingDown, BarChart2,
+  TrendingUp, TrendingDown, BarChart2, Zap, X,
 } from 'lucide-react';
+import toast from 'react-hot-toast';
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -66,6 +67,13 @@ const Payroll: React.FC = () => {
   const [loading,     setLoading]     = useState(true);
   const [marking,     setMarking]     = useState<string | null>(null);
 
+  // Stripe payout modal
+  const [payoutModal, setPayoutModal] = useState<{
+    driverId: string; driverName: string; pendingIds: string[]; defaultAmount: number;
+  } | null>(null);
+  const [payoutAmount, setPayoutAmount] = useState('');
+  const [issuingPayout, setIssuingPayout] = useState(false);
+
   // One-time fetch — payroll data is not live; re-fetch after mark-paid actions
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -108,12 +116,27 @@ const Payroll: React.FC = () => {
 
   // ── payroll calculations ──────────────────────────────────────────────────
 
-  const periodAssignments = useMemo(() =>
+  // Pending: always surface ALL outstanding assignments regardless of weekStart.
+  // This ensures routes assigned in prior weeks but never marked paid always appear.
+  const pendingAssignments = useMemo(
+    () => assignments.filter(a => a.status === 'pending'),
+    [assignments],
+  );
+
+  // Paid: only those whose paidDate falls within the selected period.
+  const paidInPeriod = useMemo(() =>
     assignments.filter(a => {
-      const ws = toDate(a.weekStart);
-      return isWithinInterval(ws, { start: range.start, end: range.end });
+      if (a.status !== 'paid') return false;
+      const pd = a.paidDate ? toDate(a.paidDate) : null;
+      return pd ? isWithinInterval(pd, { start: range.start, end: range.end }) : false;
     }),
     [assignments, range],
+  );
+
+  // Combined for driver cards: pending always visible, paid scoped to period.
+  const periodAssignments = useMemo(
+    () => [...pendingAssignments, ...paidInPeriod],
+    [pendingAssignments, paidInPeriod],
   );
 
   const dailyRateFor = (a: RouteAssignment) =>
@@ -142,11 +165,10 @@ const Payroll: React.FC = () => {
     [drivers, byDriver],
   );
 
-  const totalOutstanding = useMemo(() =>
-    periodAssignments
-      .filter(a => a.status === 'pending')
-      .reduce((s, a) => s + (a.weeklyPayout || 0), 0),
-    [periodAssignments],
+  // Outstanding = ALL pending assignments, not scoped to the selected period.
+  const totalOutstanding = useMemo(
+    () => pendingAssignments.reduce((s, a) => s + (a.weeklyPayout || 0), 0),
+    [pendingAssignments],
   );
 
   // Cloud Function callable — validates admin role + writes atomically server-side
@@ -205,6 +227,45 @@ const Payroll: React.FC = () => {
     }
   };
 
+  // ── Stripe payout ────────────────────────────────────────────────────────
+
+  const openPayoutModal = (driver: Driver) => {
+    const pendingIds = (byDriver[driver.id] || [])
+      .filter(a => a.status === 'pending')
+      .map(a => a.id);
+    const total = (byDriver[driver.id] || [])
+      .filter(a => a.status === 'pending')
+      .reduce((s, a) => s + (a.weeklyPayout || 0), 0);
+    setPayoutModal({ driverId: driver.id, driverName: driver.name, pendingIds, defaultAmount: total });
+    setPayoutAmount(total.toFixed(2));
+  };
+
+  const issueStripePayout = async () => {
+    if (!payoutModal) return;
+    const cents = Math.round(parseFloat(payoutAmount) * 100);
+    if (!cents || cents <= 0) { toast.error('Enter a valid amount'); return; }
+    setIssuingPayout(true);
+    try {
+      const payoutFn = httpsCallable<{ driverId: string; amountCents: number }, { success: boolean }>(
+        getFunctions(), 'issueDriverPayout'
+      );
+      await payoutFn({ driverId: payoutModal.driverId, amountCents: cents });
+      // Also mark the assignments as paid in Firestore
+      if (payoutModal.pendingIds.length > 0) {
+        await markPaymentFn({ assignmentIds: payoutModal.pendingIds });
+        setAssignments(prev =>
+          prev.map(a => payoutModal.pendingIds.includes(a.id) ? { ...a, status: 'paid' } : a)
+        );
+      }
+      toast.success(`$${(cents / 100).toFixed(2)} payout sent to ${payoutModal.driverName}`);
+      setPayoutModal(null);
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Payout failed');
+    } finally {
+      setIssuingPayout(false);
+    }
+  };
+
   // ── revenue calculations ──────────────────────────────────────────────────
 
   const revenueStats = useMemo(() => {
@@ -215,10 +276,12 @@ const Payroll: React.FC = () => {
     bookings
       .filter(b => b.status === 'active')
       .forEach(b => {
-        const cName = clients.find(c => c.id === b.clientId)?.name || 'Unknown';
-        const dr    = b.dailyRate || (b.weeklyRate ? b.weeklyRate / (b.daysOfWeek?.length || 5) : 0);
-        const days  = periodDays.filter(d => (b.daysOfWeek || []).includes(DAY_FULL[d.getDay()]));
-        const exp   = days.length * dr;
+        const cName     = clients.find(c => c.id === b.clientId)?.name || 'Unknown';
+        // weeklyRate is the source of truth (client page edits always update it).
+        const daysCount = b.daysOfWeek?.length || 5;
+        const dr        = b.weeklyRate ? b.weeklyRate / daysCount : (b.dailyRate || 0);
+        const days      = periodDays.filter(d => (b.daysOfWeek || []).includes(DAY_FULL[d.getDay()]));
+        const exp       = days.length * dr;
         expected += exp;
         (byClient[b.clientId] ??= { name: cName, expected: 0, actual: 0 }).expected += exp;
       });
@@ -229,7 +292,8 @@ const Payroll: React.FC = () => {
       .forEach(l => {
         const booking = bookings.find(b => b.id === l.bookingId);
         if (!booking) return;
-        const dr = booking.dailyRate || (booking.weeklyRate ? booking.weeklyRate / (booking.daysOfWeek?.length || 5) : 0);
+        const daysCount = booking.daysOfWeek?.length || 5;
+        const dr        = booking.weeklyRate ? booking.weeklyRate / daysCount : (booking.dailyRate || 0);
         actual += dr;
         if (byClient[booking.clientId]) byClient[booking.clientId].actual += dr;
       });
@@ -346,7 +410,7 @@ const Payroll: React.FC = () => {
               <DollarSign size={48} className="mx-auto text-slate-300 mb-4" />
               <p className="text-slate-600 font-semibold">No payroll entries for this period</p>
               <p className="text-slate-400 text-sm mt-1">
-                Route assignments with a week-start inside this period will appear here.
+                Pending routes always appear here. Paid routes show when their payment date falls within the selected period.
               </p>
             </div>
           ) : (
@@ -394,7 +458,16 @@ const Payroll: React.FC = () => {
                             onClick={() => markAllPaid(driver.id)}
                             className="flex items-center gap-1 bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors print:hidden"
                           >
-                            <Check size={12} /> Pay All
+                            <Check size={12} /> Mark Paid
+                          </button>
+                        )}
+                        {driver.stripeConnectPayoutsEnabled &&
+                          (byDriver[driver.id] || []).some(a => a.status === 'pending') && (
+                          <button
+                            onClick={() => openPayoutModal(driver)}
+                            className="flex items-center gap-1 bg-violet-600 hover:bg-violet-700 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors print:hidden"
+                          >
+                            <Zap size={12} /> Stripe Payout
                           </button>
                         )}
                       </div>
@@ -419,8 +492,55 @@ const Payroll: React.FC = () => {
                           </thead>
                           <tbody>
                             {dAssignments.map(a => {
-                              const booking = bookings.find(b => b.id === a.bookingId);
-                              const client  = booking ? clients.find(c => c.id === booking.clientId) : null;
+                              const booking    = bookings.find(b => b.id === a.bookingId);
+                              const client     = booking ? clients.find(c => c.id === booking.clientId) : null;
+                              const aWeekStart = toDate(a.weekStart);
+                              const aMonday    = fmt(startOfWeek(aWeekStart, { weekStartsOn: 1 }));
+                              const isThisWeek = aMonday === fmt(range.start);
+
+                              // Pending from a different week → compact "past due" row (no day grid)
+                              if (!isThisWeek) {
+                                return (
+                                  <tr key={a.id} className="border-t border-slate-50 bg-amber-50/40">
+                                    <td className="pr-4 py-2.5">
+                                      <div className="font-medium text-slate-700 truncate max-w-[120px]">
+                                        {client?.name || 'Unknown'}
+                                      </div>
+                                      <div className="text-[10px] text-amber-600 font-semibold mt-0.5">
+                                        Wk of {format(startOfWeek(aWeekStart, { weekStartsOn: 1 }), 'MMM d')}
+                                      </div>
+                                    </td>
+                                    <td colSpan={periodDays.length} className="py-2.5 px-2">
+                                      <span className="inline-flex items-center gap-1 text-xs bg-amber-100 text-amber-700 px-2.5 py-1 rounded-full font-medium">
+                                        Past due · {(a.daysWorked || []).map(d => d.slice(0, 2)).join(', ')}
+                                      </span>
+                                    </td>
+                                    <td className="text-right py-2.5 pl-3 whitespace-nowrap">
+                                      <div className="font-bold text-slate-700">${(a.weeklyPayout || 0).toFixed(2)}</div>
+                                      <div className="text-[10px] text-slate-400">weekly</div>
+                                    </td>
+                                    <td className="py-2.5 pl-3 print:hidden">
+                                      {a.status === 'paid' ? (
+                                        <span className="flex items-center gap-1 text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-medium whitespace-nowrap">
+                                          <CheckCircle size={11} /> Paid
+                                        </span>
+                                      ) : (
+                                        <button
+                                          onClick={() => markPaid(a.id)}
+                                          disabled={marking === a.id}
+                                          className="flex items-center gap-1 text-xs bg-amber-100 hover:bg-amber-200 text-amber-800 px-2 py-0.5 rounded-full font-semibold transition-colors disabled:opacity-60 whitespace-nowrap"
+                                        >
+                                          {marking === a.id
+                                            ? <span className="w-3 h-3 border border-amber-700 border-t-transparent rounded-full animate-spin" />
+                                            : <Check size={11} />}
+                                          Mark Paid
+                                        </button>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              }
+
                               const aActual = actualPayForAssignment(a);
                               return (
                                 <tr key={a.id} className="border-t border-slate-50">
@@ -522,6 +642,57 @@ const Payroll: React.FC = () => {
               })}
             </div>
           )}
+        </div>
+      )}
+
+      {/* ── STRIPE PAYOUT MODAL ─────────────────────────────────────────── */}
+      {payoutModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                <Zap size={18} className="text-violet-600" /> Stripe Payout
+              </h2>
+              <button onClick={() => setPayoutModal(null)} className="p-1.5 hover:bg-slate-100 rounded-lg">
+                <X size={16} className="text-slate-500" />
+              </button>
+            </div>
+            <p className="text-sm text-slate-600 mb-1">
+              Sending to <span className="font-semibold">{payoutModal.driverName}</span>
+            </p>
+            <p className="text-xs text-slate-400 mb-4">
+              Funds transfer via Stripe Connect · pending assignments will be marked paid
+            </p>
+            <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
+              Amount ($)
+            </label>
+            <input
+              type="number"
+              min="0.01"
+              step="0.01"
+              value={payoutAmount}
+              onChange={e => setPayoutAmount(e.target.value)}
+              className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 mb-4"
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={() => setPayoutModal(null)}
+                className="flex-1 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-xl py-2.5 text-sm font-semibold transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={issueStripePayout}
+                disabled={issuingPayout}
+                className="flex-1 bg-violet-600 hover:bg-violet-700 text-white rounded-xl py-2.5 text-sm font-semibold flex items-center justify-center gap-2 disabled:opacity-60 transition-colors"
+              >
+                {issuingPayout
+                  ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  : <Zap size={14} />}
+                {issuingPayout ? 'Sending…' : `Send $${payoutAmount}`}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -653,8 +824,10 @@ const Payroll: React.FC = () => {
                     value: routeLogs.filter(l => !l.ran && isWithinInterval(new Date(l.date + 'T00:00:00'), { start: range.start, end: range.end })).length,
                     color: 'text-red-500',
                   },
-                  { label: 'Expected revenue', value: `$${revenueStats.expected.toFixed(2)}`, color: 'text-slate-800' },
-                  { label: 'Actual revenue',   value: `$${revenueStats.actual.toFixed(2)}`,   color: 'text-emerald-600' },
+                  { label: 'Expected revenue',          value: `$${revenueStats.expected.toFixed(2)}`,            color: 'text-slate-800' },
+                  { label: 'Actual revenue',            value: `$${revenueStats.actual.toFixed(2)}`,              color: 'text-emerald-600' },
+                  { label: 'Driver cost (70% of actual)', value: `$${(revenueStats.actual * 0.70).toFixed(2)}`,   color: 'text-amber-600' },
+                  { label: 'Net to business (30%)',      value: `$${(revenueStats.actual * 0.30).toFixed(2)}`,   color: 'text-violet-700' },
                 ].map(row => (
                   <div key={row.label} className="flex justify-between items-center py-2 border-b border-slate-100">
                     <span className="text-sm text-slate-600">{row.label}</span>

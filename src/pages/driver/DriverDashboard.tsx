@@ -269,10 +269,25 @@ const DriverDashboard: React.FC = () => {
 
   // ── derived ───────────────────────────────────────────────────────────────
 
-  const todayAssignments = useMemo(
-    () => assignments.filter(a => (a.daysWorked || []).includes(todayDayName)),
-    [assignments, todayDayName],
-  );
+  const todayAssignments = useMemo(() => {
+    const forToday = assignments.filter(a => (a.daysWorked || []).includes(todayDayName));
+    // Deduplicate by bookingId — each booking may have many weekly assignment docs;
+    // keep only the most recent one so routes don't appear multiple times.
+    const deduped = new Map<string, RouteAssignment>();
+    forToday.forEach(a => {
+      const existing = deduped.get(a.bookingId);
+      if (!existing) {
+        deduped.set(a.bookingId, a);
+      } else {
+        const tExisting = existing.weekStart && typeof (existing.weekStart as any).toDate === 'function'
+          ? (existing.weekStart as any).toDate().getTime() : 0;
+        const tNew = a.weekStart && typeof (a.weekStart as any).toDate === 'function'
+          ? (a.weekStart as any).toDate().getTime() : 0;
+        if (tNew > tExisting) deduped.set(a.bookingId, a);
+      }
+    });
+    return Array.from(deduped.values());
+  }, [assignments, todayDayName]);
 
   const todayLogMap = useMemo(() => {
     const map: Record<string, RouteLog> = {};

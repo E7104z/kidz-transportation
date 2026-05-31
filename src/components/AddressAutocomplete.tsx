@@ -1,4 +1,5 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { getPlacePredictions } from '../services/placeService';
 
 interface Props {
@@ -13,7 +14,21 @@ interface Props {
 const AddressAutocomplete: React.FC<Props> = ({ value, onChange, onSelect, placeholder, className, id }) => {
   const [suggestions, setSuggestions] = useState<Array<{ description: string; place_id: string }>>([]);
   const [open, setOpen] = useState(false);
+  const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  const updateDropdownPosition = useCallback(() => {
+    if (!wrapperRef.current) return;
+    const rect = wrapperRef.current.getBoundingClientRect();
+    setDropdownStyle({
+      position: 'fixed',
+      top: rect.bottom + 4,
+      left: rect.left,
+      width: rect.width,
+      zIndex: 9999,
+    });
+  }, []);
 
   const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
@@ -34,24 +49,32 @@ const AddressAutocomplete: React.FC<Props> = ({ value, onChange, onSelect, place
 
   const handleSelect = useCallback((description: string) => {
     onChange(description);
-    onSelect?.(description);
     setSuggestions([]);
     setOpen(false);
+    onSelect?.(description);
   }, [onChange, onSelect]);
 
   const handleBlur = useCallback(() => {
-    // Delay so onMouseDown on suggestion fires first
     setTimeout(() => setOpen(false), 150);
   }, []);
 
   const handleFocus = useCallback(() => {
-    if (suggestions.length > 0) setOpen(true);
-  }, [suggestions.length]);
+    if (suggestions.length > 0) {
+      updateDropdownPosition();
+      setOpen(true);
+    }
+  }, [suggestions.length, updateDropdownPosition]);
+
+  useEffect(() => {
+    if (open) {
+      updateDropdownPosition();
+    }
+  }, [open, updateDropdownPosition]);
 
   const inputCls = className ?? 'w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500';
 
   return (
-    <div className="relative">
+    <div ref={wrapperRef} className="relative">
       <input
         id={id}
         type="text"
@@ -63,8 +86,11 @@ const AddressAutocomplete: React.FC<Props> = ({ value, onChange, onSelect, place
         autoComplete="off"
         className={inputCls}
       />
-      {open && suggestions.length > 0 && (
-        <ul className="absolute z-50 left-0 right-0 bg-white border border-slate-200 rounded-xl mt-1 max-h-52 overflow-auto shadow-lg">
+      {open && suggestions.length > 0 && createPortal(
+        <ul
+          style={dropdownStyle}
+          className="bg-white border border-slate-200 rounded-xl max-h-52 overflow-auto shadow-lg"
+        >
           {suggestions.map((s, i) => (
             <li
               key={s.place_id + i}
@@ -74,7 +100,8 @@ const AddressAutocomplete: React.FC<Props> = ({ value, onChange, onSelect, place
               {s.description}
             </li>
           ))}
-        </ul>
+        </ul>,
+        document.body
       )}
     </div>
   );
