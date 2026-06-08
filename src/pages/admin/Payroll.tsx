@@ -69,6 +69,7 @@ const Payroll: React.FC = () => {
   const [marking,     setMarking]     = useState<string | null>(null);
 
   const [printStubDriver, setPrintStubDriver] = useState<Driver | null>(null);
+  const [printAllStubs, setPrintAllStubs] = useState(false);
 
   // Stripe payout modal
   const [payoutModal, setPayoutModal] = useState<{
@@ -310,6 +311,8 @@ const Payroll: React.FC = () => {
 
   return (
     <div className="print:bg-white">
+      {/* Wrapper: hidden during stub print or print-all so only the PayStubs show */}
+      <div className={(printStubDriver || printAllStubs) ? 'print:hidden' : ''}>
       {/* Header */}
       <div className="bg-gradient-to-r from-amber-500 to-orange-500 px-8 py-6 flex items-start justify-between print:hidden">
         <div>
@@ -336,8 +339,8 @@ const Payroll: React.FC = () => {
         )}
       </div>
 
-      {/* Print-only header */}
-      <div className="hidden print:block px-8 pt-6 pb-2 border-b border-slate-300">
+      {/* Print-only header (only for global print, not stub/print-all print) */}
+      <div className={(printStubDriver || printAllStubs) ? 'hidden' : 'hidden print:block px-8 pt-6 pb-2 border-b border-slate-300'}>
         <h1 className="text-xl font-bold text-slate-800">
           KIDZ Transportation — {tab === 'payroll' ? 'Payroll' : 'Revenue'} Report
         </h1>
@@ -392,10 +395,10 @@ const Payroll: React.FC = () => {
           ↺ Refresh
         </button>
         <button
-          onClick={() => window.print()}
-          className="ml-auto flex items-center gap-1.5 text-sm font-medium text-slate-600 hover:text-slate-800 border border-slate-300 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors"
+          onClick={() => { setPrintAllStubs(true); setTimeout(() => { window.print(); setPrintAllStubs(false); }, 100); }}
+          className="ml-auto flex items-center gap-1.5 text-sm font-semibold bg-amber-500 hover:bg-amber-600 text-white px-4 py-1.5 rounded-lg transition-colors shadow-sm"
         >
-          <Printer size={15} /> Print
+          <Printer size={15} /> Print All Pay Stubs
         </button>
       </div>
 
@@ -475,7 +478,7 @@ const Payroll: React.FC = () => {
                         )}
                         <button
                           onClick={() => setPrintStubDriver(driver)}
-                          className="flex items-center gap-1 bg-slate-700 hover:bg-slate-800 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors print:hidden"
+                          className="flex items-center gap-1 bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors print:hidden shadow-sm"
                         >
                           <Printer size={12} /> Print Stub
                         </button>
@@ -654,6 +657,8 @@ const Payroll: React.FC = () => {
         </div>
       )}
 
+      </div>{/* end print:hidden wrapper */}
+
       {/* ── STRIPE PAYOUT MODAL ─────────────────────────────────────────── */}
       {payoutModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
@@ -707,7 +712,7 @@ const Payroll: React.FC = () => {
 
       {/* ── PRINT STUB MODAL ────────────────────────────────────────────── */}
       {printStubDriver && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 print:hidden">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
@@ -747,6 +752,46 @@ const Payroll: React.FC = () => {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Print-only full-page PayStub */}
+      {printStubDriver && (
+        <div className="hidden print:block p-8">
+          <PayStub
+            driver={printStubDriver}
+            assignments={byDriver[printStubDriver.id] || []}
+            bookings={bookings}
+            clients={clients}
+            periodLabel={range.label}
+            periodStart={range.start}
+            periodEnd={range.end}
+            getLog={getLog}
+            dailyRateFor={dailyRateFor}
+            printedAt={new Date()}
+          />
+        </div>
+      )}
+
+      {/* Print-only ALL driver PayStubs (when "Print All Pay Stubs" clicked) */}
+      {printAllStubs && (
+        <div className="hidden print:block">
+          {driversInPeriod.map((driver, idx) => (
+            <div key={driver.id} className={idx > 0 ? 'print:break-before-page' : ''}>
+              <PayStub
+                driver={driver}
+                assignments={byDriver[driver.id] || []}
+                bookings={bookings}
+                clients={clients}
+                periodLabel={range.label}
+                periodStart={range.start}
+                periodEnd={range.end}
+                getLog={getLog}
+                dailyRateFor={dailyRateFor}
+                printedAt={new Date()}
+              />
+            </div>
+          ))}
         </div>
       )}
 
