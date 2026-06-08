@@ -28,10 +28,6 @@ const PayStub: React.FC<PayStubProps> = ({
   dailyRateFor,
   printedAt,
 }) => {
-  const DAY_FULL: Record<number, string> = {
-    0: 'Sun', 1: 'Mon', 2: 'Tue', 3: 'Wed', 4: 'Thu', 5: 'Fri', 6: 'Sat',
-  };
-
   const DOW_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
   // Group assignments by booking for line items
