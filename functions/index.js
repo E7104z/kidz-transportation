@@ -1112,6 +1112,44 @@ exports.adminOverrideInvoice = functions.https.onCall(async (data, context) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: deleteInvoice
+// Admin can permanently delete an invoice.
+// Payload: { invoiceId: string }
+// ─────────────────────────────────────────────────────────────────────────────
+exports.deleteInvoice = functions.https.onCall(async (data, context) => {
+  await assertAdmin(context);
+
+  const { invoiceId } = data;
+  if (!invoiceId) throw new functions.https.HttpsError('invalid-argument', 'invoiceId required.');
+
+  const db     = admin.firestore();
+  const invRef = db.collection('invoices').doc(invoiceId);
+  const snap   = await invRef.get();
+  if (!snap.exists) throw new functions.https.HttpsError('not-found', 'Invoice not found.');
+
+  const invoiceData = snap.data();
+
+  // Delete the invoice document
+  await invRef.delete();
+
+  // Write audit log (fire-and-forget)
+  db.collection('auditLog').add({
+    action:      'invoice_deleted',
+    collection:  'invoices',
+    docId:       invoiceId,
+    actorUid:    context.auth.uid,
+    clientId:    invoiceData.clientId || '',
+    amount:      invoiceData.totalAmount || 0,
+    weekOf:      invoiceData.weekOf || '',
+    timestamp:   admin.firestore.FieldValue.serverTimestamp(),
+  }).catch(err => {
+    console.error('deleteInvoice: failed to write auditLog', err);
+  });
+
+  return { success: true };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // CALLABLE: processAutoPay
 // Admin-triggered: charges all auto-pay parents for unpaid invoices.
 // For each client with autoPay=true and a stripeCustomerId, charges their
@@ -1214,45 +1252,61 @@ exports.createManualInvoice = functions.https.onCall(async (data, context) => {
   await assertAdmin(context);
 
   const { clientId, description, amount, dueDate, weekOf } = data;
-  if (!clientId || !description || !amount || !dueDate) {
+  if (!clientId || !description || amount == null || !dueDate) {
     throw new functions.https.HttpsError('invalid-argument', 'clientId, description, amount, dueDate required.');
   }
 
+  if (typeof amount !== 'number' || amount <= 0 || !isFinite(amount)) {
+    throw new functions.https.HttpsError('invalid-argument', 'amount must be a positive number.');
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) {
+    throw new functions.https.HttpsError('invalid-argument', 'dueDate must be in YYYY-MM-DD format.');
+  }
+
   const db  = admin.firestore();
-  const now = admin.firestore.FieldValue.serverTimestamp();
+  const serverTime = admin.firestore.FieldValue.serverTimestamp();
 
-  const ref = await db.collection('invoices').add({
-    clientId,
-    bookingIds: [],
-    weekOf: weekOf || '',
-    periodStart: dueDate,
-    periodEnd: dueDate,
-    lineItems: [{
-      description,
-      quantity: 1,
-      unitPrice: amount,
-      total: amount,
-    }],
-    totalAmount: amount,
-    status: 'sent',
-    dueDate,
-    sentAt: now,
-    paidAt: null,
-    createdAt: now,
-    notes: `Manual invoice created by admin`,
-  });
+  try {
+    const ref = await db.collection('invoices').add({
+      clientId,
+      bookingIds: [],
+      weekOf: weekOf || '',
+      periodStart: dueDate,
+      periodEnd: dueDate,
+      lineItems: [{
+        description,
+        quantity: 1,
+        unitPrice: amount,
+        total: amount,
+      }],
+      totalAmount: amount,
+      status: 'sent',
+      dueDate,
+      sentAt: serverTime,
+      paidAt: null,
+      createdAt: serverTime,
+      notes: 'Manual invoice created by admin',
+    });
 
-  await db.collection('auditLog').add({
-    action: 'invoice_created_manual',
-    collection: 'invoices',
-    docId: ref.id,
-    clientId,
-    amount,
-    actorUid: context.auth.uid,
-    timestamp: now,
-  });
+    // Audit log write is fire-and-forget — do not fail the invoice creation if it errors
+    db.collection('auditLog').add({
+      action: 'invoice_created_manual',
+      collection: 'invoices',
+      docId: ref.id,
+      clientId,
+      amount,
+      actorUid: context.auth.uid,
+      timestamp: serverTime,
+    }).catch(err => {
+      console.error('createManualInvoice: failed to write auditLog', err);
+    });
 
-  return { invoiceId: ref.id };
+    return { invoiceId: ref.id };
+  } catch (err) {
+    console.error('createManualInvoice: failed to create invoice', err);
+    throw new functions.https.HttpsError('internal', 'Failed to create invoice: ' + (err.message || 'unknown error'));
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

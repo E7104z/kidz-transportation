@@ -49,3 +49,4 @@ functions/createDriverAccounts.js
 /registration_*.pdf
 /w9_*.pdf
 
+.env*.local

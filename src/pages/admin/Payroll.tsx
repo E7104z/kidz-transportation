@@ -5,6 +5,7 @@ import {
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { db } from '../../services/firebase';
 import type { RouteAssignment, Driver, Booking, Client, RouteLog } from '../../types';
+import PayStub from '../../components/payroll/PayStub';
 import {
   format, addWeeks, addMonths, addYears,
   startOfWeek, endOfWeek, startOfMonth, endOfMonth, startOfYear, endOfYear,
@@ -66,6 +67,8 @@ const Payroll: React.FC = () => {
   const [routeLogs,   setRouteLogs]   = useState<RouteLog[]>([]);
   const [loading,     setLoading]     = useState(true);
   const [marking,     setMarking]     = useState<string | null>(null);
+
+  const [printStubDriver, setPrintStubDriver] = useState<Driver | null>(null);
 
   // Stripe payout modal
   const [payoutModal, setPayoutModal] = useState<{
@@ -470,6 +473,12 @@ const Payroll: React.FC = () => {
                             <Zap size={12} /> Stripe Payout
                           </button>
                         )}
+                        <button
+                          onClick={() => setPrintStubDriver(driver)}
+                          className="flex items-center gap-1 bg-slate-700 hover:bg-slate-800 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors print:hidden"
+                        >
+                          <Printer size={12} /> Print Stub
+                        </button>
                       </div>
                     </div>
 
@@ -690,6 +699,51 @@ const Payroll: React.FC = () => {
                   ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
                   : <Zap size={14} />}
                 {issuingPayout ? 'Sending…' : `Send $${payoutAmount}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── PRINT STUB MODAL ────────────────────────────────────────────── */}
+      {printStubDriver && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                <Printer size={18} className="text-slate-600" /> Print Pay Stub
+              </h2>
+              <button onClick={() => setPrintStubDriver(null)} className="p-1.5 hover:bg-slate-100 rounded-lg">
+                <X size={16} className="text-slate-500" />
+              </button>
+            </div>
+            <p className="text-sm text-slate-600 mb-4">
+              Print a professional pay stub for <span className="font-semibold">{printStubDriver.name}</span>
+            </p>
+            <PayStub
+              driver={printStubDriver}
+              assignments={byDriver[printStubDriver.id] || []}
+              bookings={bookings}
+              clients={clients}
+              periodLabel={range.label}
+              periodStart={range.start}
+              periodEnd={range.end}
+              getLog={getLog}
+              dailyRateFor={dailyRateFor}
+              printedAt={new Date()}
+            />
+            <div className="flex gap-2 mt-4">
+              <button
+                onClick={() => setPrintStubDriver(null)}
+                className="flex-1 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-xl py-2.5 text-sm font-semibold transition-colors"
+              >
+                Close
+              </button>
+              <button
+                onClick={() => window.print()}
+                className="flex-1 bg-slate-700 hover:bg-slate-800 text-white rounded-xl py-2.5 text-sm font-semibold flex items-center justify-center gap-2 transition-colors"
+              >
+                <Printer size={14} /> Print Now
               </button>
             </div>
           </div>
