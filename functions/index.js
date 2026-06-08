@@ -1063,7 +1063,7 @@ exports.processTask = functions.firestore
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CALLABLE: adminOverrideInvoice
-// Admin can mark an invoice as paid, waived, or extend due date.
+// Admin can mark an invoice as paid, waived, or extend due date. (v2)
 // Payload: { invoiceId: string, action: 'mark_paid' | 'waive' | 'extend', note?: string, newDueDate?: string }
 // ─────────────────────────────────────────────────────────────────────────────
 exports.adminOverrideInvoice = functions.https.onCall(async (data, context) => {
@@ -1113,7 +1113,7 @@ exports.adminOverrideInvoice = functions.https.onCall(async (data, context) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CALLABLE: deleteInvoice
-// Admin can permanently delete an invoice.
+// Admin can permanently delete an invoice. (v2)
 // Payload: { invoiceId: string }
 // ─────────────────────────────────────────────────────────────────────────────
 exports.deleteInvoice = functions.https.onCall(async (data, context) => {

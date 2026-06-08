@@ -16,6 +16,59 @@ export interface PayStubProps {
   printedAt: Date;
 }
 
+// ── Number-to-words for check amount line ──────────────────────────────────
+const ONES = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine'];
+const TEENS = ['Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+const TENS = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+
+function numberToWords(n: number): string {
+  if (n === 0) return 'Zero';
+  const dollars = Math.floor(n);
+  const cents = Math.round((n - dollars) * 100);
+
+  function convertHundreds(num: number): string {
+    if (num === 0) return '';
+    if (num < 10) return ONES[num];
+    if (num < 20) return TEENS[num - 10];
+    if (num < 100) {
+      const t = TENS[Math.floor(num / 10)];
+      const o = ONES[num % 10];
+      return o ? `${t}-${o}` : t;
+    }
+    const h = ONES[Math.floor(num / 100)];
+    const rest = convertHundreds(num % 100);
+    return rest ? `${h} Hundred ${rest}` : `${h} Hundred`;
+  }
+
+  if (dollars < 1000) {
+    const dPart = convertHundreds(dollars);
+    const cPart = cents > 0 ? ` and ${cents.toString().padStart(2, '0')}/100` : ' and 00/100';
+    return dPart + cPart;
+  }
+
+  const thousands = Math.floor(dollars / 1000);
+  const remainder = dollars % 1000;
+  const tPart = convertHundreds(thousands) + ' Thousand';
+  const rPart = convertHundreds(remainder);
+  const dollarWords = rPart ? `${tPart} ${rPart}` : tPart;
+  const cPart = cents > 0 ? ` and ${cents.toString().padStart(2, '0')}/100` : ' and 00/100';
+  return dollarWords + cPart;
+}
+
+// ── Check-number generator ─────────────────────────────────────────────────
+function generateCheckNumber(assignments: RouteAssignment[], driverId: string): string {
+  // Deterministic check number from driver + first assignment
+  const seed = assignments.length > 0
+    ? assignments.map(a => a.id.slice(0, 6)).join('')
+    : driverId.slice(0, 8);
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) {
+    hash = ((hash << 5) - hash) + seed.charCodeAt(i);
+    hash |= 0;
+  }
+  return String(Math.abs(hash) % 90000 + 10000); // 5-digit check number
+}
+
 const PayStub: React.FC<PayStubProps> = ({
   driver,
   assignments,
@@ -37,11 +90,8 @@ const PayStub: React.FC<PayStubProps> = ({
       const client = booking ? clients.find(c => c.id === booking.clientId) : null;
       const rate = dailyRateFor(a);
 
-      // Compute actual days worked with run-log verification
       const dayDetails = DOW_ORDER.filter(d => (a.daysWorked || []).includes(d)).map(d => {
-        // Find the actual date for this day abbreviation in the period
         const dayIdx = DOW_ORDER.indexOf(d);
-        // The week starts on Monday. Map the day index to a date offset from periodStart.
         const date = new Date(periodStart);
         date.setDate(periodStart.getDate() + dayIdx);
         const log = getLog(a.bookingId, date);
@@ -104,173 +154,133 @@ const PayStub: React.FC<PayStubProps> = ({
       : 'Employee';
   const splitPercent = driver.payoutSplit || 70;
 
+  const netPay = totals.driverCut;
+  const amountWords = numberToWords(netPay);
+  const checkNumber = generateCheckNumber(assignments, driver.id);
+  const checkDate = format(new Date(), 'MM/dd/yyyy');
+
   return (
-    <div className="paystub-container max-w-[800px] mx-auto bg-white text-black font-sans">
-      {/* ===== TOP STUB ===== */}
-      <div className="paystub-stub border-2 border-slate-800 rounded-lg p-6 mb-6">
-        {/* Header */}
-        <div className="flex items-start justify-between border-b-2 border-slate-300 pb-4 mb-4">
-          <div className="flex items-center gap-3">
-            <img
-              src={logo}
-              alt="KIDZ Transportation"
-              className="h-14 w-auto object-contain print:h-14"
-            />
-            <div>
-              <h1 className="text-xl font-extrabold text-slate-800 leading-tight">
-                KIDZ Transportation
-              </h1>
-              <p className="text-xs text-slate-500">Safe Rides for Little Lives</p>
-            </div>
-          </div>
-          <div className="text-right">
-            <h2 className="text-lg font-bold text-slate-700 uppercase tracking-wide">
-              PAYCHECK STUB
-            </h2>
-            <p className="text-xs text-slate-500">{periodLabel}</p>
-          </div>
+    <div className="paystub-container max-w-[850px] mx-auto bg-white text-black font-sans print:max-w-full">
+      {/* ================================================================= */}
+      {/* TOP HALF — THE CHECK                                              */}
+      {/* ================================================================= */}
+      <div className="paystub-check relative border-2 border-slate-700 bg-[#fefcf5] p-8">
+        {/* Subtle check-pattern background */}
+        <div
+          className="absolute inset-0 pointer-events-none opacity-[0.03]"
+          style={{
+            backgroundImage: `repeating-linear-gradient(0deg, transparent, transparent 6px, #1e3a5f 6px, #1e3a5f 7px)`,
+          }}
+        />
+
+        {/* Check Number — top right */}
+        <div className="absolute top-5 right-6 text-right">
+          <span className="text-[10px] text-slate-400 uppercase tracking-widest block leading-none">Check No.</span>
+          <span className="text-lg font-mono font-bold text-slate-700 tracking-wider">{checkNumber}</span>
         </div>
 
-        {/* Driver Info & Period */}
-        <div className="grid grid-cols-2 gap-4 mb-4">
+        {/* Company Header */}
+        <div className="flex items-start gap-4 mb-6">
+          <img
+            src={logo}
+            alt="KIDZ Transportation"
+            className="h-12 w-auto object-contain print:h-12 flex-shrink-0"
+          />
           <div>
-            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">
-              Pay To
-            </h3>
-            <p className="text-base font-bold text-slate-800">{driverName}</p>
-            <p className="text-xs text-slate-600">{driverAddress}</p>
-            <p className="text-xs text-slate-600">{driverEmail}</p>
-            <p className="text-xs text-slate-600">{driverPhone}</p>
-            <p className="text-xs text-slate-400 mt-1">{driverTypeLabel}</p>
-          </div>
-          <div className="text-right">
-            <div className="inline-block text-left">
-              <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                <span className="text-slate-500 font-semibold">Pay Period:</span>
-                <span className="text-slate-800">
-                  {format(periodStart, 'MMM d')} – {format(periodEnd, 'MMM d, yyyy')}
-                </span>
-                <span className="text-slate-500 font-semibold">Printed:</span>
-                <span className="text-slate-800">{format(printedAt, 'MMM d, yyyy h:mm a')}</span>
-                <span className="text-slate-500 font-semibold">Driver Split:</span>
-                <span className="text-slate-800 font-bold">{splitPercent}%</span>
-                <span className="text-slate-500 font-semibold">Assignment Count:</span>
-                <span className="text-slate-800">{assignments.length}</span>
-              </div>
-            </div>
+            <h1 className="text-xl font-extrabold text-slate-800 leading-tight tracking-tight">
+              KIDZ Transportation LLC
+            </h1>
+            <p className="text-[11px] text-slate-500 leading-relaxed">
+              Safe Rides for Little Lives
+            </p>
           </div>
         </div>
 
-        {/* Line Items Table */}
-        <table className="w-full text-xs border-collapse mb-4">
-          <thead>
-            <tr className="border-b-2 border-slate-300">
-              <th className="text-left py-2 font-semibold text-slate-600 uppercase text-[10px] tracking-wider">
-                Client / Route
-              </th>
-              <th className="text-center py-2 font-semibold text-slate-600 uppercase text-[10px] tracking-wider w-[90px]">
-                Days
-              </th>
-              <th className="text-center py-2 font-semibold text-slate-600 uppercase text-[10px] tracking-wider w-[80px]">
-                Rate
-              </th>
-              <th className="text-right py-2 font-semibold text-slate-600 uppercase text-[10px] tracking-wider w-[90px]">
-                Driver Pay
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {lineItems.map((item, i) => (
-              <tr key={i} className="border-b border-slate-150">
-                <td className="py-2">
-                  <div className="font-semibold text-slate-700">{item.clientName}</div>
-                  <div className="text-slate-400 truncate max-w-[300px]">{item.route}</div>
-                  <div className="flex gap-1 mt-1">
-                    {item.dayDetails.map(d => (
-                      <span
-                        key={d.day}
-                        className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-[9px] font-bold ${
-                          d.ran
-                            ? 'bg-emerald-100 text-emerald-700'
-                            : d.missed
-                            ? 'bg-red-100 text-red-500'
-                            : d.unconfirmed
-                            ? 'bg-amber-50 text-amber-400'
-                            : 'bg-slate-50 text-slate-300'
-                        }`}
-                        title={`${d.day} ${d.date} — ${d.ran ? 'Completed' : d.missed ? 'Missed' : d.unconfirmed ? 'Unconfirmed' : 'Not Scheduled'}`}
-                      >
-                        {d.day.charAt(0)}
-                      </span>
-                    ))}
-                  </div>
-                </td>
-                <td className="text-center py-2">
-                  <span className="font-bold text-slate-700">{item.daysWorkedCount}</span>
-                  <span className="text-slate-400">/{item.daysScheduled}</span>
-                </td>
-                <td className="text-center py-2 text-slate-600">
-                  ${item.rate.toFixed(2)}
-                </td>
-                <td className="text-right py-2 font-bold text-slate-800">
-                  ${item.driverCut.toFixed(2)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-          <tfoot>
-            <tr className="border-t-2 border-slate-300 font-bold">
-              <td className="py-2 text-slate-600">Totals</td>
-              <td className="text-center py-2 text-slate-800">
-                {totals.daysWorked}/{totals.daysScheduled}
-              </td>
-              <td className="text-center py-2" />
-              <td className="text-right py-2 text-base text-slate-800">
-                ${totals.driverCut.toFixed(2)}
-              </td>
-            </tr>
-          </tfoot>
-        </table>
+        {/* Date line */}
+        <div className="flex items-center gap-3 mb-5 ml-[55%]">
+          <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider flex-shrink-0">Date</span>
+          <div className="flex-1 border-b border-slate-400 pb-0.5">
+            <span className="text-sm font-mono text-slate-700">{checkDate}</span>
+          </div>
+        </div>
 
-        {/* Summary Box */}
-        <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
-          <div className="grid grid-cols-4 gap-3 text-xs">
-            <div>
-              <span className="text-slate-400 block">Expected Pay</span>
-              <span className="font-bold text-slate-700">${totals.expectedPay.toFixed(2)}</span>
-            </div>
-            <div>
-              <span className="text-slate-400 block">Actual Pay</span>
-              <span className="font-bold text-emerald-600">${totals.actualPay.toFixed(2)}</span>
-            </div>
-            <div>
-              <span className="text-slate-400 block">
-                Driver Cut ({splitPercent}%)
-              </span>
-              <span className="font-bold text-lg text-slate-800">
-                ${totals.driverCut.toFixed(2)}
-              </span>
-            </div>
-            <div>
-              <span className="text-slate-400 block">Business Share</span>
-              <span className="font-bold text-violet-600">
-                ${(totals.actualPay - totals.driverCut).toFixed(2)}
-              </span>
-            </div>
+        {/* Pay to the Order of */}
+        <div className="mb-3">
+          <span className="text-[9px] font-semibold text-slate-400 uppercase tracking-widest block mb-1">
+            Pay to the Order of
+          </span>
+          <div className="border-b border-slate-500 pb-1">
+            <span className="text-base font-bold text-slate-800">{driverName}</span>
+          </div>
+          <p className="text-[10px] text-slate-500 mt-0.5 leading-relaxed">
+            {driverAddress}
+          </p>
+        </div>
+
+        {/* Amount in Words */}
+        <div className="mb-3">
+          <span className="text-[9px] font-semibold text-slate-400 uppercase tracking-widest block mb-1">
+            The Sum of
+          </span>
+          <div className="border-b border-slate-500 pb-1">
+            <span className="text-sm font-semibold text-slate-700 italic">
+              {amountWords} Dollars
+            </span>
+          </div>
+        </div>
+
+        {/* Amount Box */}
+        <div className="absolute right-6 top-[120px] w-[180px]">
+          <div className="border-2 border-slate-600 rounded-sm bg-white p-3">
+            <span className="text-[9px] text-slate-400 uppercase tracking-wider block mb-0.5">Amount</span>
+            <span className="text-2xl font-extrabold font-mono text-slate-800 tracking-tight">
+              ${netPay.toFixed(2)}
+            </span>
+          </div>
+        </div>
+
+        {/* Memo line */}
+        <div className="flex items-center gap-3 mb-6 mt-8">
+          <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider flex-shrink-0">Memo</span>
+          <div className="flex-1 border-b border-slate-400 pb-0.5">
+            <span className="text-xs text-slate-600">
+              {periodLabel} · {format(periodStart, 'MMM d')} – {format(periodEnd, 'MMM d, yyyy')} · {driverTypeLabel}
+            </span>
+          </div>
+        </div>
+
+        {/* Signature line */}
+        <div className="flex items-center gap-3 mt-8 ml-[55%]">
+          <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider flex-shrink-0">Authorized Signature</span>
+          <div className="flex-1 border-b border-slate-400 pb-0.5" />
+        </div>
+
+        {/* MICR line (stylized bank numbers at bottom) */}
+        <div className="mt-8 pt-3 border-t border-slate-200">
+          <div className="flex items-center justify-between font-mono text-[13px] tracking-[2px] text-slate-300 select-none">
+            <span>⑆ :123456789:⑆</span>
+            <span>⑆ 9876543210 :{checkNumber}:⑆</span>
           </div>
         </div>
       </div>
 
-      {/* ===== PERFORATION LINE ===== */}
-      <div className="paystub-perforation border-t-2 border-dashed border-slate-400 my-6 relative">
-        <span className="absolute -top-3 left-1/2 -translate-x-1/2 bg-white px-3 text-[9px] text-slate-400 font-semibold uppercase tracking-widest">
-          ✂ Detach Here
-        </span>
+      {/* ================================================================= */}
+      {/* PERFORATION LINE                                                    */}
+      {/* ================================================================= */}
+      <div className="paystub-perforation border-t-2 border-dashed border-slate-400 my-5 relative">
+        <div className="absolute -top-[10px] left-1/2 -translate-x-1/2 bg-white px-4">
+          <span className="text-[9px] text-slate-400 font-semibold uppercase tracking-[0.2em]">
+            ✂ Detach — Retain This Stub For Your Records
+          </span>
+        </div>
       </div>
 
-      {/* ===== BOTTOM STUB (Driver Copy) ===== */}
-      <div className="paystub-stub border-2 border-slate-800 rounded-lg p-6">
-        <div className="flex items-start justify-between border-b-2 border-slate-300 pb-4 mb-4">
+      {/* ================================================================= */}
+      {/* BOTTOM HALF — THE PAY STUB                                         */}
+      {/* ================================================================= */}
+      <div className="paystub-stub border-2 border-slate-700 bg-[#fefcf5] p-7">
+        {/* Stub Header */}
+        <div className="flex items-start justify-between border-b-2 border-slate-300 pb-4 mb-5">
           <div className="flex items-center gap-3">
             <img
               src={logo}
@@ -278,61 +288,156 @@ const PayStub: React.FC<PayStubProps> = ({
               className="h-10 w-auto object-contain print:h-10"
             />
             <div>
-              <h1 className="text-lg font-extrabold text-slate-800 leading-tight">
-                KIDZ Transportation
-              </h1>
-              <p className="text-xs text-slate-500">Driver Copy — {periodLabel}</p>
+              <h2 className="text-lg font-extrabold text-slate-800 leading-tight">
+                KIDZ Transportation LLC
+              </h2>
+              <p className="text-[10px] text-slate-500">Earnings Statement · {periodLabel}</p>
             </div>
           </div>
           <div className="text-right">
-            <div className="text-2xl font-extrabold text-slate-800">
-              ${totals.driverCut.toFixed(2)}
+            <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-0.5">This Period</div>
+            <div className="text-2xl font-extrabold font-mono text-slate-800">
+              ${netPay.toFixed(2)}
             </div>
-            <p className="text-xs text-slate-500">
-              Net Pay ({splitPercent}% of ${totals.actualPay.toFixed(2)})
-            </p>
           </div>
         </div>
 
-        {/* Compact line items for stub */}
-        <table className="w-full text-[10px] border-collapse mb-3">
-          <thead>
-            <tr className="border-b border-slate-200">
-              <th className="text-left py-1 font-semibold text-slate-500 uppercase tracking-wide">
-                Client
-              </th>
-              <th className="text-center py-1 font-semibold text-slate-500 uppercase tracking-wide w-[40px]">
-                Days
-              </th>
-              <th className="text-right py-1 font-semibold text-slate-500 uppercase tracking-wide w-[70px]">
-                Amount
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {lineItems.map((item, i) => (
-              <tr key={i} className="border-b border-slate-100">
-                <td className="py-1 text-slate-700 font-medium">{item.clientName}</td>
-                <td className="text-center py-1 text-slate-600">{item.daysWorkedCount}</td>
-                <td className="text-right py-1 text-slate-700 font-semibold">
-                  ${item.driverCut.toFixed(2)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-          <tfoot>
-            <tr className="border-t border-slate-300 font-bold text-xs">
-              <td className="py-1 text-slate-600">Total</td>
-              <td className="text-center py-1 text-slate-800">{totals.daysWorked}</td>
-              <td className="text-right py-1 text-slate-800">
-                ${totals.driverCut.toFixed(2)}
-              </td>
-            </tr>
-          </tfoot>
-        </table>
+        {/* Driver & Period Info */}
+        <div className="grid grid-cols-2 gap-x-8 gap-y-2 text-xs mb-5 pb-4 border-b border-slate-200">
+          <div>
+            <div className="flex justify-between py-0.5">
+              <span className="text-slate-400 font-medium">Driver</span>
+              <span className="text-slate-700 font-semibold text-right">{driverName}</span>
+            </div>
+            <div className="flex justify-between py-0.5">
+              <span className="text-slate-400 font-medium">Status</span>
+              <span className="text-slate-700 font-semibold text-right">{driverTypeLabel}</span>
+            </div>
+            <div className="flex justify-between py-0.5">
+              <span className="text-slate-400 font-medium">Contact</span>
+              <span className="text-slate-600 text-right">{driverPhone}</span>
+            </div>
+          </div>
+          <div>
+            <div className="flex justify-between py-0.5">
+              <span className="text-slate-400 font-medium">Pay Period</span>
+              <span className="text-slate-700 font-semibold text-right">
+                {format(periodStart, 'MMM d')} – {format(periodEnd, 'MMM d, yyyy')}
+              </span>
+            </div>
+            <div className="flex justify-between py-0.5">
+              <span className="text-slate-400 font-medium">Split Rate</span>
+              <span className="text-slate-700 font-semibold text-right">{splitPercent}% Driver / {100 - splitPercent}% Business</span>
+            </div>
+            <div className="flex justify-between py-0.5">
+              <span className="text-slate-400 font-medium">Check No.</span>
+              <span className="text-slate-700 font-mono font-semibold text-right">{checkNumber}</span>
+            </div>
+          </div>
+        </div>
 
-        <div className="text-[10px] text-slate-400 border-t border-slate-200 pt-2 text-center">
-          Printed {format(printedAt, 'MMM d, yyyy h:mm a')} · KIDZ Transportation · Safe Rides for Little Lives
+        {/* Earnings Table */}
+        <div className="mb-5">
+          <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.15em] mb-2">
+            Earnings Breakdown
+          </h3>
+          <table className="w-full text-xs border-collapse">
+            <thead>
+              <tr className="border-y-2 border-slate-300 bg-slate-50/50">
+                <th className="text-left py-2 px-1 font-semibold text-slate-600 uppercase text-[10px] tracking-wider">
+                  Client / Route
+                </th>
+                <th className="text-center py-2 px-1 font-semibold text-slate-600 uppercase text-[10px] tracking-wider w-[60px]">
+                  Days
+                </th>
+                <th className="text-center py-2 px-1 font-semibold text-slate-600 uppercase text-[10px] tracking-wider w-[70px]">
+                  Rate
+                </th>
+                <th className="text-right py-2 px-1 font-semibold text-slate-600 uppercase text-[10px] tracking-wider w-[80px]">
+                  Amount
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {lineItems.map((item, i) => (
+                <tr key={i} className="border-b border-slate-100 hover:bg-slate-50/30">
+                  <td className="py-2.5 px-1">
+                    <div className="font-semibold text-slate-700">{item.clientName}</div>
+                    <div className="text-slate-400 truncate max-w-[320px] text-[11px] leading-tight mt-0.5">
+                      {item.route}
+                    </div>
+                    <div className="flex gap-0.5 mt-1">
+                      {item.dayDetails.map(d => (
+                        <span
+                          key={d.day}
+                          className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-[8px] font-bold ${
+                            d.ran
+                              ? 'bg-emerald-100 text-emerald-700 ring-1 ring-emerald-300'
+                              : d.missed
+                              ? 'bg-red-100 text-red-500 ring-1 ring-red-200'
+                              : d.unconfirmed
+                              ? 'bg-amber-50 text-amber-400 ring-1 ring-amber-200'
+                              : 'bg-slate-50 text-slate-300'
+                          }`}
+                          title={`${d.day} ${d.date} — ${d.ran ? 'Completed' : d.missed ? 'Missed' : d.unconfirmed ? 'Unconfirmed' : 'Not Scheduled'}`}
+                        >
+                          {d.day.charAt(0)}
+                        </span>
+                      ))}
+                    </div>
+                  </td>
+                  <td className="text-center py-2.5 px-1">
+                    <span className="font-bold text-slate-700">{item.daysWorkedCount}</span>
+                    <span className="text-slate-400">/{item.daysScheduled}</span>
+                  </td>
+                  <td className="text-center py-2.5 px-1 text-slate-600 font-mono">
+                    ${item.rate.toFixed(2)}
+                  </td>
+                  <td className="text-right py-2.5 px-1 font-bold font-mono text-slate-800">
+                    ${item.driverCut.toFixed(2)}
+                  </td>
+                </tr>
+              ))}
+              {lineItems.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="text-center py-6 text-slate-400 text-xs italic">
+                    No assignments in this pay period
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Totals Section */}
+        <div className="border-t-2 border-slate-300 pt-4">
+          <div className="flex justify-end mb-3">
+            <div className="w-[280px] space-y-1.5 text-xs">
+              <div className="flex justify-between py-0.5">
+                <span className="text-slate-500">Days Worked / Scheduled</span>
+                <span className="text-slate-700 font-semibold">{totals.daysWorked} / {totals.daysScheduled}</span>
+              </div>
+              <div className="flex justify-between py-0.5">
+                <span className="text-slate-500">Gross Earnings ({splitPercent}% split)</span>
+                <span className="text-slate-700 font-mono font-semibold">${totals.driverCut.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between py-0.5">
+                <span className="text-slate-500">Deductions</span>
+                <span className="text-slate-400">$0.00</span>
+              </div>
+              <div className="flex justify-between py-1 border-t-2 border-slate-800 mt-1 pt-1">
+                <span className="text-sm font-extrabold text-slate-800 uppercase tracking-wide">Net Pay</span>
+                <span className="text-sm font-extrabold font-mono text-slate-800">${netPay.toFixed(2)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="mt-5 pt-3 border-t border-slate-200 text-center">
+          <p className="text-[9px] text-slate-400 tracking-wide">
+            KIDZ Transportation LLC · Printed {format(printedAt, 'MMM d, yyyy h:mm a')} · Check #{checkNumber} · Safe Rides for Little Lives
+          </p>
         </div>
       </div>
     </div>
