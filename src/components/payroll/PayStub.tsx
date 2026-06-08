@@ -144,7 +144,6 @@ const PayStub: React.FC<PayStubProps> = ({
 
   const driverName = driver.companyName || driver.name;
   const driverAddress = driver.address || '—';
-  const driverEmail = driver.email || '—';
   const driverPhone = driver.phone || '—';
   const driverTypeLabel =
     driver.driverType === 'contractor'
