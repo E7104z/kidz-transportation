@@ -164,9 +164,11 @@ const Payroll: React.FC = () => {
     return map;
   }, [periodAssignments]);
 
+  // Show ALL drivers always so Print Stub is accessible regardless of period activity.
+  // Drivers without period assignments still appear with an empty assignment list.
   const driversInPeriod = useMemo(
-    () => drivers.filter(d => byDriver[d.id]),
-    [drivers, byDriver],
+    () => drivers,
+    [drivers],
   );
 
   // Outstanding = ALL pending assignments, not scoped to the selected period.
@@ -414,10 +416,8 @@ const Payroll: React.FC = () => {
           ) : driversInPeriod.length === 0 ? (
             <div className="text-center py-24">
               <DollarSign size={48} className="mx-auto text-slate-300 mb-4" />
-              <p className="text-slate-600 font-semibold">No payroll entries for this period</p>
-              <p className="text-slate-400 text-sm mt-1">
-                Pending routes always appear here. Paid routes show when their payment date falls within the selected period.
-              </p>
+              <p className="text-slate-600 font-semibold">No drivers found</p>
+              <p className="text-slate-400 text-sm mt-1">Add drivers to see payroll entries here.</p>
             </div>
           ) : (
             <div className="space-y-6">
