@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { getFunctions, httpsCallable } from 'firebase/functions';
-import { createUserWithEmailAndPassword } from 'firebase/auth';
+import { createUserWithEmailAndPassword, signInWithEmailAndPassword } from 'firebase/auth';
 import { auth } from '../../services/firebase';
 import { createUserRecord } from '../../services/userService';
 
@@ -89,8 +89,32 @@ const AcceptDriverInvite: React.FC = () => {
     setSubmitting(true);
 
     try {
-      const cred = await createUserWithEmailAndPassword(auth, driverInfo.email, password);
-      await createUserRecord(cred.user.uid, driverInfo.email, driverInfo.driverName, 'driver', driverInfo.driverId);
+      let uid: string;
+      try {
+        const cred = await createUserWithEmailAndPassword(auth, driverInfo.email, password);
+        uid = cred.user.uid;
+      } catch (createErr: unknown) {
+        const code = (createErr as { code?: string })?.code;
+        if (code === 'auth/email-already-in-use') {
+          // Account already exists — sign them in with the provided password instead
+          try {
+            const cred = await signInWithEmailAndPassword(auth, driverInfo.email, password);
+            uid = cred.user.uid;
+          } catch (signInErr: unknown) {
+            const signInCode = (signInErr as { code?: string })?.code;
+            if (signInCode === 'auth/wrong-password' || signInCode === 'auth/invalid-credential') {
+              setError('An account already exists for this email but the password is incorrect. Please use the password for your existing account.');
+            } else {
+              setError('An account already exists for this email. Please try again or contact support.');
+            }
+            setSubmitting(false);
+            return;
+          }
+        } else {
+          throw createErr;
+        }
+      }
+      await createUserRecord(uid, driverInfo.email, driverInfo.driverName, 'driver', driverInfo.driverId);
       navigate('/driver/onboarding', { replace: true });
     } catch (err: unknown) {
       const msg = (err as Error)?.message ?? '';

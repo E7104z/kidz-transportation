@@ -1,6 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Clock, Coffee, Play, Square, AlertTriangle } from 'lucide-react';
 import { useDriverShift } from '../hooks/useDriverShift';
+
+const HOS_WARN_MINUTES = 600;  // 10 h
+const HOS_LIMIT_MINUTES = 660; // 11 h
 
 interface Props {
   driverId: string;
@@ -34,7 +37,19 @@ const ShiftControls: React.FC<Props> = ({ driverId }) => {
     ? formatElapsed(activeBreak.startedAt.toMillis())
     : null;
 
-  const hos = activeShift?.hoursOfServiceWarning;
+  // Compute HOS warning live from elapsed time (tick forces re-eval every second)
+  // so drivers see the warning while actively driving, not only after clocking out.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const hos: 'at_limit' | 'approaching_limit' | null = useMemo(() => {
+    if (!activeShift) return null;
+    const elapsedMinutes = Math.floor((Date.now() - activeShift.clockInAt.toMillis()) / 60_000);
+    const drivingMinutes = Math.max(0, elapsedMinutes - (activeShift.totalBreakMinutes ?? 0));
+    if (drivingMinutes >= HOS_LIMIT_MINUTES) return 'at_limit';
+    if (drivingMinutes >= HOS_WARN_MINUTES) return 'approaching_limit';
+    return null;
+  // tick is intentionally included to force re-computation every second
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeShift, tick]);
 
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-4 mb-4 shadow-sm">

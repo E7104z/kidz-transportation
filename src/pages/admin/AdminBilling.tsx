@@ -12,7 +12,7 @@ import {
   DollarSign, CheckCircle, AlertCircle, Clock, FileText,
   Receipt, RefreshCw, Loader2, Shield, ChevronDown, ChevronUp,
   Calendar, Zap, Plus, Search,
-  Ban,
+  Ban, Trash2,
 } from 'lucide-react';
 
 const STATUS_STYLES: Record<string, { label: string; color: string; bg: string; icon: React.ElementType }> = {
@@ -158,6 +158,23 @@ const AdminBilling: React.FC = () => {
     }
   };
 
+  // ── delete invoice ───────────────────────────────────────────────────
+
+  const handleDelete = async (invoiceId: string) => {
+    if (!window.confirm('Permanently delete this invoice? This cannot be undone.')) return;
+    setActionInvoiceId(invoiceId);
+    try {
+      const fn = httpsCallable(functions, 'deleteInvoice');
+      await fn({ invoiceId });
+      toast.success('Invoice deleted');
+      loadData();
+    } catch (err: any) {
+      toast.error(err?.message || 'Delete failed');
+    } finally {
+      setActionInvoiceId(null);
+    }
+  };
+
   // ── override invoice ──────────────────────────────────────────────────
 
   const handleOverride = async (invoiceId: string, action: 'mark_paid' | 'waive' | 'extend', note?: string, newDueDate?: string) => {
@@ -182,8 +199,9 @@ const AdminBilling: React.FC = () => {
 
   const handleCreateManual = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!manualClientId || !manualDesc || !manualAmount || !manualDueDate) {
-      toast.error('All fields are required');
+    const parsedAmount = parseFloat(manualAmount);
+    if (!manualClientId || !manualDesc || !manualDueDate || isNaN(parsedAmount) || parsedAmount <= 0) {
+      toast.error('All fields are required with a valid positive amount');
       return;
     }
     setCreatingManual(true);
@@ -192,7 +210,7 @@ const AdminBilling: React.FC = () => {
       await fn({
         clientId: manualClientId,
         description: manualDesc,
-        amount: parseFloat(manualAmount),
+        amount: parsedAmount,
         dueDate: manualDueDate,
       });
       toast.success('Manual invoice created');
@@ -297,7 +315,7 @@ const AdminBilling: React.FC = () => {
 
       {/* Tab content */}
       {tab === 'overview' && (
-        <OverviewTab invoices={invoices} clientMap={clientMap} onOverride={handleOverride} actionInvoiceId={actionInvoiceId} />
+        <OverviewTab invoices={invoices} clientMap={clientMap} onOverride={handleOverride} onDelete={handleDelete} actionInvoiceId={actionInvoiceId} />
       )}
 
       {tab === 'invoices' && (
@@ -311,6 +329,7 @@ const AdminBilling: React.FC = () => {
           expandedId={expandedId}
           onToggleExpand={(id) => setExpandedId(expandedId === id ? null : id)}
           onOverride={handleOverride}
+          onDelete={handleDelete}
           actionInvoiceId={actionInvoiceId}
         />
       )}
@@ -354,10 +373,11 @@ function StatCard({ icon: Icon, iconBg, iconColor, label, value, sub, highlight 
 
 // ── Overview tab ──────────────────────────────────────────────────────────
 
-function OverviewTab({ invoices, clientMap, onOverride, actionInvoiceId }: {
+function OverviewTab({ invoices, clientMap, onOverride, onDelete, actionInvoiceId }: {
   invoices: Invoice[];
   clientMap: Record<string, Client>;
   onOverride: (id: string, action: 'mark_paid' | 'waive' | 'extend', note?: string, newDueDate?: string) => void;
+  onDelete: (id: string) => void;
   actionInvoiceId: string | null;
 }) {
   const unpaid = invoices.filter(i => i.status === 'sent' || i.status === 'overdue');
@@ -379,7 +399,7 @@ function OverviewTab({ invoices, clientMap, onOverride, actionInvoiceId }: {
         ) : (
           <div className="space-y-2">
             {unpaid.map(inv => (
-              <AdminInvoiceRow key={inv.id} invoice={inv} clientMap={clientMap} onOverride={onOverride} isActioning={actionInvoiceId === inv.id} />
+              <AdminInvoiceRow key={inv.id} invoice={inv} clientMap={clientMap} onOverride={onOverride} onDelete={onDelete} isActioning={actionInvoiceId === inv.id} />
             ))}
           </div>
         )}
@@ -394,7 +414,7 @@ function OverviewTab({ invoices, clientMap, onOverride, actionInvoiceId }: {
           </h2>
           <div className="space-y-2">
             {recentPaid.map(inv => (
-              <AdminInvoiceRow key={inv.id} invoice={inv} clientMap={clientMap} onOverride={onOverride} isActioning={actionInvoiceId === inv.id} />
+              <AdminInvoiceRow key={inv.id} invoice={inv} clientMap={clientMap} onOverride={onOverride} onDelete={onDelete} isActioning={actionInvoiceId === inv.id} />
             ))}
           </div>
         </div>
@@ -405,7 +425,7 @@ function OverviewTab({ invoices, clientMap, onOverride, actionInvoiceId }: {
 
 // ── Invoices tab ──────────────────────────────────────────────────────────
 
-function InvoicesTab({ invoices, clientMap, searchQuery, onSearchChange, statusFilter, onStatusFilterChange, expandedId, onToggleExpand, onOverride, actionInvoiceId }: {
+function InvoicesTab({ invoices, clientMap, searchQuery, onSearchChange, statusFilter, onStatusFilterChange, expandedId, onToggleExpand, onOverride, onDelete, actionInvoiceId }: {
   invoices: Invoice[];
   clientMap: Record<string, Client>;
   searchQuery: string;
@@ -415,6 +435,7 @@ function InvoicesTab({ invoices, clientMap, searchQuery, onSearchChange, statusF
   expandedId: string | null;
   onToggleExpand: (id: string) => void;
   onOverride: (id: string, action: 'mark_paid' | 'waive' | 'extend', note?: string, newDueDate?: string) => void;
+  onDelete: (id: string) => void;
   actionInvoiceId: string | null;
 }) {
   return (
@@ -462,6 +483,7 @@ function InvoicesTab({ invoices, clientMap, searchQuery, onSearchChange, statusF
               invoice={inv}
               clientMap={clientMap}
               onOverride={onOverride}
+              onDelete={onDelete}
               isActioning={actionInvoiceId === inv.id}
               expanded={expandedId === inv.id}
               onToggle={() => onToggleExpand(inv.id)}
@@ -561,10 +583,11 @@ function CreateTab({ clients, clientId, onClientChange, description, onDescChang
 
 // ── Admin invoice row ────────────────────────────────────────────────────
 
-function AdminInvoiceRow({ invoice: inv, clientMap, onOverride, isActioning, expanded, onToggle }: {
+function AdminInvoiceRow({ invoice: inv, clientMap, onOverride, onDelete, isActioning, expanded, onToggle }: {
   invoice: Invoice;
   clientMap: Record<string, Client>;
   onOverride: (id: string, action: 'mark_paid' | 'waive' | 'extend', note?: string, newDueDate?: string) => void;
+  onDelete: (id: string) => void;
   isActioning: boolean;
   expanded?: boolean;
   onToggle?: () => void;
@@ -623,6 +646,15 @@ function AdminInvoiceRow({ invoice: inv, clientMap, onOverride, isActioning, exp
               </button>
             </div>
           )}
+          {/* Delete button — always visible for any invoice */}
+          <button
+            onClick={e => { e.stopPropagation(); onDelete(inv.id); }}
+            disabled={isActioning}
+            className="px-2 py-1 text-[10px] font-semibold bg-red-100 text-red-600 rounded-md hover:bg-red-200 transition disabled:opacity-50"
+            title="Delete invoice"
+          >
+            <Trash2 size={10} />
+          </button>
           {isExpandable && (
             isOpen ? <ChevronUp size={14} className="text-slate-400" /> : <ChevronDown size={14} className="text-slate-400" />
           )}

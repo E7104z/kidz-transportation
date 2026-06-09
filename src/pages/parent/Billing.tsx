@@ -31,7 +31,9 @@ const Billing: React.FC = () => {
   const [payingId, setPayingId] = useState<string | null>(null);
   const [togglingAutoPay, setTogglingAutoPay] = useState(false);
 
-  // Handle post-payment redirect
+  const [updatingCard, setUpdatingCard] = useState(false);
+
+  // Handle post-payment / post-card-update redirects
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('paid')) {
@@ -40,8 +42,26 @@ const Billing: React.FC = () => {
     } else if (params.get('cancelled')) {
       toast('Payment cancelled', { icon: '↩️' });
       window.history.replaceState({}, '', window.location.pathname);
+    } else if (params.get('card_updated')) {
+      toast.success('Payment method updated successfully.');
+      window.history.replaceState({}, '', window.location.pathname);
     }
   }, []);
+
+  const handleUpdateCard = async () => {
+    setUpdatingCard(true);
+    try {
+      const fn = httpsCallable(functions, 'createSetupSession');
+      const result = await fn({});
+      const { url } = result.data as { url: string };
+      if (url) window.location.href = url;
+      else toast.error('Could not start card update session');
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to update card');
+    } finally {
+      setUpdatingCard(false);
+    }
+  };
 
   // Gate: secondary parents and coordinators do not see billing.
   if (!permissions.canSeeBilling) {
@@ -223,20 +243,34 @@ const Billing: React.FC = () => {
               </div>
             </div>
           </div>
-          <button
-            onClick={handleToggleAutoPay}
-            disabled={togglingAutoPay || !isPrimary}
-            title={!isPrimary ? 'Only the primary parent can change auto-pay' : undefined}
-            className="flex items-center gap-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {togglingAutoPay ? (
-              <Loader2 size={20} className="animate-spin text-slate-400" />
-            ) : client?.autoPay ? (
-              <ToggleRight size={32} className="text-violet-600" />
-            ) : (
-              <ToggleLeft size={32} className="text-slate-300 hover:text-slate-400" />
+          <div className="flex items-center gap-3">
+            {isPrimary && client?.paymentMethodLast4 && (
+              <button
+                onClick={handleUpdateCard}
+                disabled={updatingCard}
+                className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 hover:text-slate-800 border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+              >
+                {updatingCard
+                  ? <Loader2 size={12} className="animate-spin" />
+                  : <CreditCard size={12} />}
+                Update Card
+              </button>
             )}
-          </button>
+            <button
+              onClick={handleToggleAutoPay}
+              disabled={togglingAutoPay || !isPrimary}
+              title={!isPrimary ? 'Only the primary parent can change auto-pay' : undefined}
+              className="flex items-center gap-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {togglingAutoPay ? (
+                <Loader2 size={20} className="animate-spin text-slate-400" />
+              ) : client?.autoPay ? (
+                <ToggleRight size={32} className="text-violet-600" />
+              ) : (
+                <ToggleLeft size={32} className="text-slate-300 hover:text-slate-400" />
+              )}
+            </button>
+          </div>
         </div>
       </div>
 

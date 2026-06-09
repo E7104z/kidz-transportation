@@ -385,6 +385,192 @@ exports.finalizeContractSignature = functions
   });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// DRIVER CONTRACT FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: saveDriverContractRecord                              (admin only)
+// Browser renders PDF + uploads to Storage, then calls this to atomically
+// write the driverContracts doc, stamp the driver, and log the action.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.saveDriverContractRecord = functions.https.onCall(async (data, context) => {
+  await assertAdmin(context);
+
+  const { driverId, pdfUrl, contractData } = data;
+  if (typeof driverId !== 'string' || !driverId)
+    throw new functions.https.HttpsError('invalid-argument', 'driverId is required.');
+  if (typeof pdfUrl !== 'string' || !pdfUrl)
+    throw new functions.https.HttpsError('invalid-argument', 'pdfUrl is required.');
+  if (!contractData || typeof contractData !== 'object')
+    throw new functions.https.HttpsError('invalid-argument', 'contractData is required.');
+
+  const { generatedAt: _g, sentAt: _s, ...safeContractData } = contractData;
+
+  const db        = admin.firestore();
+  const driverRef = db.collection('drivers').doc(driverId);
+  const driverSnap = await driverRef.get();
+  if (!driverSnap.exists)
+    throw new functions.https.HttpsError('not-found', `Driver ${driverId} not found.`);
+
+  const now         = admin.firestore.FieldValue.serverTimestamp();
+  const contractRef = db.collection('driverContracts').doc();
+  const signingToken = crypto.randomBytes(32).toString('base64url');
+  const batch       = db.batch();
+
+  batch.set(contractRef, {
+    driverId,
+    ...safeContractData,
+    pdfUrl,
+    generatedAt: now,
+    sentAt:      null,
+    signingToken,
+    signedAt:    null,
+  });
+
+  batch.update(driverRef, { latestDriverContractId: contractRef.id });
+
+  batch.set(db.collection('auditLog').doc(), {
+    action:     'driver_contract_generated',
+    collection: 'driverContracts',
+    docId:      contractRef.id,
+    driverId,
+    actorUid:   context.auth.uid,
+    timestamp:  now,
+  });
+
+  await batch.commit();
+  return { contractId: contractRef.id, signingToken };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: getDriverContractForSigning                           (public)
+// Unauthenticated. Returns minimal data needed to render the signing page.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.getDriverContractForSigning = functions.https.onCall(async (data) => {
+  const { contractId, token } = data || {};
+  if (typeof contractId !== 'string' || !contractId)
+    throw new functions.https.HttpsError('invalid-argument', 'contractId is required.');
+  if (typeof token !== 'string' || !token)
+    throw new functions.https.HttpsError('invalid-argument', 'token is required.');
+
+  const db           = admin.firestore();
+  const contractRef  = db.collection('driverContracts').doc(contractId);
+  const contractSnap = await contractRef.get();
+  if (!contractSnap.exists)
+    throw new functions.https.HttpsError('not-found', 'Contract not found.');
+
+  const contract = contractSnap.data();
+  if (contract.signingToken !== token)
+    throw new functions.https.HttpsError('permission-denied', 'Invalid signing link.');
+
+  const driverSnap = await db.collection('drivers').doc(contract.driverId).get();
+  if (!driverSnap.exists)
+    throw new functions.https.HttpsError('not-found', 'Driver not found.');
+  const driver = { id: driverSnap.id, ...driverSnap.data() };
+
+  return {
+    contract: {
+      id:           contractSnap.id,
+      pdfUrl:       contract.pdfUrl,
+      driverName:   contract.driverName   || '',
+      payoutSplit:  contract.payoutSplit   || 70,
+      signedAt:     contract.signedAt      || null,
+      signedByName: contract.signedByName  || null,
+      signedPdfUrl: contract.signedPdfUrl  || null,
+    },
+    driver,
+    alreadySigned: !!contract.signedAt,
+  };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: finalizeDriverContractSignature                       (public)
+// Accepts signed PDF (base64) + signature metadata. Validates token, uploads
+// signed PDF to Storage, marks driver active, and writes audit log.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.finalizeDriverContractSignature = functions
+  .runWith({ memory: '512MB', timeoutSeconds: 60 })
+  .https.onCall(async (data, context) => {
+    const { contractId, token, signedPdfBase64, signatureDataUrl, signedByName } = data || {};
+    if (typeof contractId !== 'string' || !contractId)
+      throw new functions.https.HttpsError('invalid-argument', 'contractId is required.');
+    if (typeof token !== 'string' || !token)
+      throw new functions.https.HttpsError('invalid-argument', 'token is required.');
+    if (typeof signedPdfBase64 !== 'string' || signedPdfBase64.length < 100)
+      throw new functions.https.HttpsError('invalid-argument', 'signedPdfBase64 is required.');
+    if (typeof signatureDataUrl !== 'string' || !signatureDataUrl.startsWith('data:image/'))
+      throw new functions.https.HttpsError('invalid-argument', 'signatureDataUrl is required.');
+    if (typeof signedByName !== 'string' || signedByName.trim().length < 2)
+      throw new functions.https.HttpsError('invalid-argument', 'signedByName is required.');
+
+    const approxBytes = Math.floor((signedPdfBase64.length * 3) / 4);
+    if (approxBytes > 10 * 1024 * 1024)
+      throw new functions.https.HttpsError('invalid-argument', 'Signed PDF exceeds 10 MB limit.');
+
+    const db           = admin.firestore();
+    const contractRef  = db.collection('driverContracts').doc(contractId);
+    const contractSnap = await contractRef.get();
+    if (!contractSnap.exists)
+      throw new functions.https.HttpsError('not-found', 'Contract not found.');
+    const contract = contractSnap.data();
+
+    if (contract.signingToken !== token)
+      throw new functions.https.HttpsError('permission-denied', 'Invalid signing link.');
+    if (contract.signedAt)
+      throw new functions.https.HttpsError('already-exists', 'This contract has already been signed.');
+
+    const bucket    = admin.storage().bucket();
+    const pdfBuffer = Buffer.from(signedPdfBase64, 'base64');
+    const fileName  = `driverContracts/${contract.driverId}_${contractId}_signed_${Date.now()}.pdf`;
+    const file      = bucket.file(fileName);
+
+    const downloadToken = crypto.randomBytes(16).toString('hex');
+    await file.save(pdfBuffer, {
+      metadata: {
+        contentType: 'application/pdf',
+        metadata: { firebaseStorageDownloadTokens: downloadToken },
+      },
+      resumable: false,
+    });
+    const signedPdfUrl =
+      `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/` +
+      `${encodeURIComponent(fileName)}?alt=media&token=${downloadToken}`;
+
+    const now      = admin.firestore.FieldValue.serverTimestamp();
+    const ip       = (context.rawRequest && (context.rawRequest.ip || context.rawRequest.headers?.['x-forwarded-for'])) || '';
+    const signerIp = typeof ip === 'string' ? ip.split(',')[0].trim().slice(0, 64) : '';
+
+    const driverRef = db.collection('drivers').doc(contract.driverId);
+    const batch     = db.batch();
+
+    batch.update(contractRef, {
+      signedAt:     now,
+      signedByName: signedByName.trim().slice(0, 120),
+      signedByEmail: contract.emailedTo || '',
+      signerIp,
+      signedPdfUrl,
+      pdfUrl:       signedPdfUrl,
+      signingToken: admin.firestore.FieldValue.delete(),
+    });
+
+    batch.update(driverRef, { status: 'active' });
+
+    batch.set(db.collection('auditLog').doc(), {
+      action:       'driver_contract_signed',
+      collection:   'driverContracts',
+      docId:        contractId,
+      driverId:     contract.driverId,
+      actorUid:     null,
+      signedByName: signedByName.trim().slice(0, 120),
+      signerIp,
+      timestamp:    now,
+    });
+
+    await batch.commit();
+    return { signedPdfUrl };
+  });
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // BILLING & STRIPE FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -481,6 +667,9 @@ exports.createCheckoutSession = functions.https.onCall(async (data, context) => 
     success_url: `${baseUrl}/parent/billing?paid=${invoiceId}`,
     cancel_url:  `${baseUrl}/parent/billing?cancelled=true`,
     payment_intent_data: {
+      // 'off_session' saves the card to the Stripe customer so auto-pay can
+      // charge it later without the parent being present.
+      setup_future_usage: 'off_session',
       metadata: {
         invoiceId: invoiceId,
         clientId: invoice.clientId,
@@ -551,12 +740,21 @@ exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
       });
     }
 
-    // Save payment method for future auto-pay if customer chose to
+    // Attach payment method to the Stripe customer as the default so
+    // subsequent auto-pay off-session charges always have a usable PM.
     if (session.customer && session.payment_intent) {
       try {
         const pi = await getStripe().paymentIntents.retrieve(session.payment_intent);
         if (pi.payment_method) {
           const pm = await getStripe().paymentMethods.retrieve(pi.payment_method);
+          // Attach if not already attached to this customer
+          if (!pm.customer) {
+            await getStripe().paymentMethods.attach(pm.id, { customer: session.customer });
+          }
+          // Set as the customer's default invoice payment method
+          await getStripe().customers.update(session.customer, {
+            invoice_settings: { default_payment_method: pm.id },
+          });
           const clientId = session.metadata?.clientId;
           if (clientId) {
             await db.collection('clients').doc(clientId).update({
@@ -564,8 +762,50 @@ exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
               paymentMethodBrand: pm.card?.brand || '',
             });
           }
+          // Notify parent that payment was received
+          const userSnap = await db.collection('users')
+            .where('linkedId', '==', session.metadata?.clientId).limit(1).get();
+          if (!userSnap.empty) {
+            const invData = invSnap.data();
+            await createNotification({
+              recipientUid: userSnap.docs[0].id,
+              audience:     'parent',
+              type:         'invoice_paid',
+              title:        'Payment Received',
+              body:         `Your payment of $${invData?.totalAmount?.toFixed(2) ?? '0.00'} for the week of ${invData?.weekOf || invData?.periodStart || 'N/A'} has been received. Thank you!`,
+              clientId:     session.metadata?.clientId,
+              invoiceId:    invoiceId,
+              priority:     'normal',
+            });
+          }
         }
       } catch (e) { console.warn('Could not save payment method details:', e.message); }
+    }
+  }
+
+  // Handle setup mode completion — parent updated their saved card
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    if (session.mode === 'setup' && session.setup_intent && session.customer) {
+      try {
+        const si = await getStripe().setupIntents.retrieve(session.setup_intent);
+        if (si.payment_method) {
+          const pm = await getStripe().paymentMethods.retrieve(si.payment_method);
+          if (!pm.customer) {
+            await getStripe().paymentMethods.attach(si.payment_method, { customer: session.customer });
+          }
+          await getStripe().customers.update(session.customer, {
+            invoice_settings: { default_payment_method: si.payment_method },
+          });
+          const clientId = si.metadata?.clientId;
+          if (clientId) {
+            await db.collection('clients').doc(clientId).update({
+              paymentMethodLast4: pm.card?.last4 || '',
+              paymentMethodBrand: pm.card?.brand || '',
+            });
+          }
+        }
+      } catch (e) { console.warn('Could not process setup session:', e.message); }
     }
   }
 
@@ -577,6 +817,51 @@ exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
   });
 
   res.status(200).send('ok');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: createSetupSession
+// Parent requests a Stripe Checkout session in "setup" mode to save or replace
+// their payment method without being charged.
+// Returns: { url: string }
+// ─────────────────────────────────────────────────────────────────────────────
+exports.createSetupSession = functions.https.onCall(async (data, context) => {
+  const uid = context.auth?.uid;
+  if (!uid) throw new functions.https.HttpsError('unauthenticated', 'Must be signed in.');
+
+  const db = admin.firestore();
+  const userSnap = await db.collection('users').doc(uid).get();
+  const linkedId = userSnap.data()?.linkedId;
+  if (!linkedId) throw new functions.https.HttpsError('not-found', 'No linked client.');
+
+  const clientSnap = await db.collection('clients').doc(linkedId).get();
+  const client = clientSnap.data();
+  let customerId = client?.stripeCustomerId;
+
+  if (!customerId) {
+    const customer = await getStripe().customers.create({
+      email: client?.email || '',
+      name:  client?.name  || '',
+      metadata: { clientId: linkedId },
+    });
+    customerId = customer.id;
+    await clientSnap.ref.update({ stripeCustomerId: customerId });
+  }
+
+  const baseUrl = process.env.APP_URL || 'https://kidz-transportation.com';
+
+  const session = await getStripe().checkout.sessions.create({
+    customer: customerId,
+    payment_method_types: ['card'],
+    mode: 'setup',
+    setup_intent_data: {
+      metadata: { clientId: linkedId },
+    },
+    success_url: `${baseUrl}/parent/billing?card_updated=1`,
+    cancel_url:  `${baseUrl}/parent/billing`,
+  });
+
+  return { url: session.url };
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -672,11 +957,19 @@ async function doGenerateWeeklyInvoices(weekOfInput) {
         .map(sid => students[sid]?.name || 'Student')
         .join(', ');
 
-      const { weekly, daily } = computeWeeklyCharge(
-        booking.mileage || 0, daysPerWeek, isRoundTrip, numStudents
-      );
+      const billableDays = daysPerWeek >= 3 ? 5 : daysPerWeek || 5;
 
-      const billableDays = daysPerWeek >= 3 ? 5 : daysPerWeek;
+      // Prefer admin-set rates over the auto-calculated price so manual
+      // overrides on the Clients page are honoured in invoices.
+      let weekly, daily;
+      if (booking.weeklyRate > 0) {
+        weekly = Math.round(booking.weeklyRate * 100) / 100;
+        daily  = Math.round((weekly / billableDays) * 100) / 100;
+      } else {
+        ({ weekly, daily } = computeWeeklyCharge(
+          booking.mileage || 0, daysPerWeek, isRoundTrip, numStudents
+        ));
+      }
 
       lineItems.push({
         description: `${studentNames} — ${isRoundTrip ? 'Round-trip' : 'One-way'} (${daysPerWeek} days/wk)`,
@@ -770,7 +1063,7 @@ exports.processTask = functions.firestore
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CALLABLE: adminOverrideInvoice
-// Admin can mark an invoice as paid, waived, or extend due date.
+// Admin can mark an invoice as paid, waived, or extend due date. (v2)
 // Payload: { invoiceId: string, action: 'mark_paid' | 'waive' | 'extend', note?: string, newDueDate?: string }
 // ─────────────────────────────────────────────────────────────────────────────
 exports.adminOverrideInvoice = functions.https.onCall(async (data, context) => {
@@ -813,6 +1106,44 @@ exports.adminOverrideInvoice = functions.https.onCall(async (data, context) => {
     before: { status: snap.data().status },
     after: updates,
     timestamp: now,
+  });
+
+  return { success: true };
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CALLABLE: deleteInvoice
+// Admin can permanently delete an invoice. (v2)
+// Payload: { invoiceId: string }
+// ─────────────────────────────────────────────────────────────────────────────
+exports.deleteInvoice = functions.https.onCall(async (data, context) => {
+  await assertAdmin(context);
+
+  const { invoiceId } = data;
+  if (!invoiceId) throw new functions.https.HttpsError('invalid-argument', 'invoiceId required.');
+
+  const db     = admin.firestore();
+  const invRef = db.collection('invoices').doc(invoiceId);
+  const snap   = await invRef.get();
+  if (!snap.exists) throw new functions.https.HttpsError('not-found', 'Invoice not found.');
+
+  const invoiceData = snap.data();
+
+  // Delete the invoice document
+  await invRef.delete();
+
+  // Write audit log (fire-and-forget)
+  db.collection('auditLog').add({
+    action:      'invoice_deleted',
+    collection:  'invoices',
+    docId:       invoiceId,
+    actorUid:    context.auth.uid,
+    clientId:    invoiceData.clientId || '',
+    amount:      invoiceData.totalAmount || 0,
+    weekOf:      invoiceData.weekOf || '',
+    timestamp:   admin.firestore.FieldValue.serverTimestamp(),
+  }).catch(err => {
+    console.error('deleteInvoice: failed to write auditLog', err);
   });
 
   return { success: true };
@@ -887,6 +1218,25 @@ exports.processAutoPay = functions.https.onCall(async (data, context) => {
       console.error(`Auto-pay failed for client ${inv.clientId}:`, err.message);
       await invDoc.ref.update({ autoPayFailed: true });
       failed++;
+      // Notify the parent so they can update their payment method
+      try {
+        const userSnap = await db.collection('users')
+          .where('linkedId', '==', inv.clientId).limit(1).get();
+        if (!userSnap.empty) {
+          await createNotification({
+            recipientUid: userSnap.docs[0].id,
+            audience:     'parent',
+            type:         'invoice_overdue',
+            title:        'Auto-Pay Failed',
+            body:         `We were unable to process your auto-payment of $${inv.totalAmount?.toFixed(2) ?? '0.00'}. Please pay manually or update your payment method.`,
+            clientId:     inv.clientId,
+            invoiceId:    invDoc.id,
+            priority:     'high',
+          });
+        }
+      } catch (notifyErr) {
+        console.warn('processAutoPay: notification failed:', notifyErr.message);
+      }
     }
   }
 
@@ -902,45 +1252,61 @@ exports.createManualInvoice = functions.https.onCall(async (data, context) => {
   await assertAdmin(context);
 
   const { clientId, description, amount, dueDate, weekOf } = data;
-  if (!clientId || !description || !amount || !dueDate) {
+  if (!clientId || !description || amount == null || !dueDate) {
     throw new functions.https.HttpsError('invalid-argument', 'clientId, description, amount, dueDate required.');
   }
 
+  if (typeof amount !== 'number' || amount <= 0 || !isFinite(amount)) {
+    throw new functions.https.HttpsError('invalid-argument', 'amount must be a positive number.');
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) {
+    throw new functions.https.HttpsError('invalid-argument', 'dueDate must be in YYYY-MM-DD format.');
+  }
+
   const db  = admin.firestore();
-  const now = admin.firestore.FieldValue.serverTimestamp();
+  const serverTime = admin.firestore.FieldValue.serverTimestamp();
 
-  const ref = await db.collection('invoices').add({
-    clientId,
-    bookingIds: [],
-    weekOf: weekOf || '',
-    periodStart: dueDate,
-    periodEnd: dueDate,
-    lineItems: [{
-      description,
-      quantity: 1,
-      unitPrice: amount,
-      total: amount,
-    }],
-    totalAmount: amount,
-    status: 'sent',
-    dueDate,
-    sentAt: now,
-    paidAt: null,
-    createdAt: now,
-    notes: `Manual invoice created by admin`,
-  });
+  try {
+    const ref = await db.collection('invoices').add({
+      clientId,
+      bookingIds: [],
+      weekOf: weekOf || '',
+      periodStart: dueDate,
+      periodEnd: dueDate,
+      lineItems: [{
+        description,
+        quantity: 1,
+        unitPrice: amount,
+        total: amount,
+      }],
+      totalAmount: amount,
+      status: 'sent',
+      dueDate,
+      sentAt: serverTime,
+      paidAt: null,
+      createdAt: serverTime,
+      notes: 'Manual invoice created by admin',
+    });
 
-  await db.collection('auditLog').add({
-    action: 'invoice_created_manual',
-    collection: 'invoices',
-    docId: ref.id,
-    clientId,
-    amount,
-    actorUid: context.auth.uid,
-    timestamp: now,
-  });
+    // Audit log write is fire-and-forget — do not fail the invoice creation if it errors
+    db.collection('auditLog').add({
+      action: 'invoice_created_manual',
+      collection: 'invoices',
+      docId: ref.id,
+      clientId,
+      amount,
+      actorUid: context.auth.uid,
+      timestamp: serverTime,
+    }).catch(err => {
+      console.error('createManualInvoice: failed to write auditLog', err);
+    });
 
-  return { invoiceId: ref.id };
+    return { invoiceId: ref.id };
+  } catch (err) {
+    console.error('createManualInvoice: failed to create invoice', err);
+    throw new functions.https.HttpsError('internal', 'Failed to create invoice: ' + (err.message || 'unknown error'));
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1945,6 +2311,58 @@ exports.generateWeeklyInvoicesAuto = functions.pubsub
         priority: 'high',
       });
     }
+    return null;
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCHEDULED: markInvoicesOverdue
+// Runs daily at 7 AM Central. Marks any 'sent' invoice whose dueDate is in the
+// past as 'overdue' and sends a notification to the parent.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.markInvoicesOverdue = functions.pubsub
+  .schedule('every day 07:00')
+  .timeZone('America/Chicago')
+  .onRun(async () => {
+    const db = admin.firestore();
+    const today = new Date().toISOString().split('T')[0]; // "YYYY-MM-DD"
+
+    const snap = await db.collection('invoices')
+      .where('status', '==', 'sent')
+      .get();
+
+    let marked = 0;
+    const batch = db.batch();
+
+    for (const invDoc of snap.docs) {
+      const inv = invDoc.data();
+      if (!inv.dueDate || inv.dueDate >= today) continue;
+
+      batch.update(invDoc.ref, { status: 'overdue' });
+      marked++;
+
+      // Notify the parent
+      try {
+        const userSnap = await db.collection('users')
+          .where('linkedId', '==', inv.clientId).limit(1).get();
+        if (!userSnap.empty) {
+          await createNotification({
+            recipientUid: userSnap.docs[0].id,
+            audience:     'parent',
+            type:         'invoice_overdue',
+            title:        'Invoice Overdue',
+            body:         `Your payment of $${inv.totalAmount?.toFixed(2) ?? '0.00'} for the week of ${inv.weekOf || inv.periodStart || 'N/A'} was due on ${inv.dueDate}. Please pay as soon as possible.`,
+            clientId:     inv.clientId,
+            invoiceId:    invDoc.id,
+            priority:     'high',
+          });
+        }
+      } catch (notifyErr) {
+        console.warn('markInvoicesOverdue: notification failed for', invDoc.id, notifyErr.message);
+      }
+    }
+
+    if (marked > 0) await batch.commit();
+    console.log(`markInvoicesOverdue: marked ${marked} invoice(s) overdue`);
     return null;
   });
 

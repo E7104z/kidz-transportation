@@ -2,8 +2,10 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import { Toaster } from 'react-hot-toast';
 import Apply from './pages/public/Apply';
 import SignContract from './pages/public/SignContract';
+import DriverSignContract from './pages/public/DriverSignContract';
 import HealthPage from './pages/public/Health';
 import Login from './pages/auth/Login';
+import AuthAction from './pages/auth/AuthAction';
 import Dashboard from './pages/admin/Dashboard';
 import PipelineKanban from './pages/admin/PipelineKanban';
 import Clients from './pages/admin/Clients';
@@ -44,6 +46,7 @@ function App() {
       <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/auth/action" element={<AuthAction />} />
           <Route path="/driver/setup" element={<DriverSetup />} />
           <Route path="/driver/accept-invite" element={<AcceptDriverInvite />} />
           <Route
@@ -111,6 +114,7 @@ function App() {
           />
           <Route path="/apply" element={<Apply />} />
           <Route path="/sign/:contractId" element={<SignContract />} />
+          <Route path="/driver-sign/:contractId" element={<DriverSignContract />} />
           <Route path="/health" element={<HealthPage />} />
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>

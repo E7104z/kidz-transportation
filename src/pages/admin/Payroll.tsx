@@ -5,6 +5,7 @@ import {
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { db } from '../../services/firebase';
 import type { RouteAssignment, Driver, Booking, Client, RouteLog } from '../../types';
+import PayStub from '../../components/payroll/PayStub';
 import {
   format, addWeeks, addMonths, addYears,
   startOfWeek, endOfWeek, startOfMonth, endOfMonth, startOfYear, endOfYear,
@@ -12,8 +13,9 @@ import {
 } from 'date-fns';
 import {
   DollarSign, CheckCircle, Check, ChevronLeft, ChevronRight, Printer,
-  TrendingUp, TrendingDown, BarChart2,
+  TrendingUp, TrendingDown, BarChart2, Zap, X,
 } from 'lucide-react';
+import toast from 'react-hot-toast';
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -66,6 +68,16 @@ const Payroll: React.FC = () => {
   const [loading,     setLoading]     = useState(true);
   const [marking,     setMarking]     = useState<string | null>(null);
 
+  const [printStubDriver, setPrintStubDriver] = useState<Driver | null>(null);
+  const [printAllStubs, setPrintAllStubs] = useState(false);
+
+  // Stripe payout modal
+  const [payoutModal, setPayoutModal] = useState<{
+    driverId: string; driverName: string; pendingIds: string[]; defaultAmount: number;
+  } | null>(null);
+  const [payoutAmount, setPayoutAmount] = useState('');
+  const [issuingPayout, setIssuingPayout] = useState(false);
+
   // One-time fetch — payroll data is not live; re-fetch after mark-paid actions
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -108,12 +120,27 @@ const Payroll: React.FC = () => {
 
   // ── payroll calculations ──────────────────────────────────────────────────
 
-  const periodAssignments = useMemo(() =>
+  // Pending: always surface ALL outstanding assignments regardless of weekStart.
+  // This ensures routes assigned in prior weeks but never marked paid always appear.
+  const pendingAssignments = useMemo(
+    () => assignments.filter(a => a.status === 'pending'),
+    [assignments],
+  );
+
+  // Paid: only those whose paidDate falls within the selected period.
+  const paidInPeriod = useMemo(() =>
     assignments.filter(a => {
-      const ws = toDate(a.weekStart);
-      return isWithinInterval(ws, { start: range.start, end: range.end });
+      if (a.status !== 'paid') return false;
+      const pd = a.paidDate ? toDate(a.paidDate) : null;
+      return pd ? isWithinInterval(pd, { start: range.start, end: range.end }) : false;
     }),
     [assignments, range],
+  );
+
+  // Combined for driver cards: pending always visible, paid scoped to period.
+  const periodAssignments = useMemo(
+    () => [...pendingAssignments, ...paidInPeriod],
+    [pendingAssignments, paidInPeriod],
   );
 
   const dailyRateFor = (a: RouteAssignment) =>
@@ -137,16 +164,17 @@ const Payroll: React.FC = () => {
     return map;
   }, [periodAssignments]);
 
+  // Show ALL drivers always so Print Stub is accessible regardless of period activity.
+  // Drivers without period assignments still appear with an empty assignment list.
   const driversInPeriod = useMemo(
-    () => drivers.filter(d => byDriver[d.id]),
-    [drivers, byDriver],
+    () => drivers,
+    [drivers],
   );
 
-  const totalOutstanding = useMemo(() =>
-    periodAssignments
-      .filter(a => a.status === 'pending')
-      .reduce((s, a) => s + (a.weeklyPayout || 0), 0),
-    [periodAssignments],
+  // Outstanding = ALL pending assignments, not scoped to the selected period.
+  const totalOutstanding = useMemo(
+    () => pendingAssignments.reduce((s, a) => s + (a.weeklyPayout || 0), 0),
+    [pendingAssignments],
   );
 
   // Cloud Function callable — validates admin role + writes atomically server-side
@@ -205,6 +233,45 @@ const Payroll: React.FC = () => {
     }
   };
 
+  // ── Stripe payout ────────────────────────────────────────────────────────
+
+  const openPayoutModal = (driver: Driver) => {
+    const pendingIds = (byDriver[driver.id] || [])
+      .filter(a => a.status === 'pending')
+      .map(a => a.id);
+    const total = (byDriver[driver.id] || [])
+      .filter(a => a.status === 'pending')
+      .reduce((s, a) => s + (a.weeklyPayout || 0), 0);
+    setPayoutModal({ driverId: driver.id, driverName: driver.name, pendingIds, defaultAmount: total });
+    setPayoutAmount(total.toFixed(2));
+  };
+
+  const issueStripePayout = async () => {
+    if (!payoutModal) return;
+    const cents = Math.round(parseFloat(payoutAmount) * 100);
+    if (!cents || cents <= 0) { toast.error('Enter a valid amount'); return; }
+    setIssuingPayout(true);
+    try {
+      const payoutFn = httpsCallable<{ driverId: string; amountCents: number }, { success: boolean }>(
+        getFunctions(), 'issueDriverPayout'
+      );
+      await payoutFn({ driverId: payoutModal.driverId, amountCents: cents });
+      // Also mark the assignments as paid in Firestore
+      if (payoutModal.pendingIds.length > 0) {
+        await markPaymentFn({ assignmentIds: payoutModal.pendingIds });
+        setAssignments(prev =>
+          prev.map(a => payoutModal.pendingIds.includes(a.id) ? { ...a, status: 'paid' } : a)
+        );
+      }
+      toast.success(`$${(cents / 100).toFixed(2)} payout sent to ${payoutModal.driverName}`);
+      setPayoutModal(null);
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Payout failed');
+    } finally {
+      setIssuingPayout(false);
+    }
+  };
+
   // ── revenue calculations ──────────────────────────────────────────────────
 
   const revenueStats = useMemo(() => {
@@ -215,10 +282,12 @@ const Payroll: React.FC = () => {
     bookings
       .filter(b => b.status === 'active')
       .forEach(b => {
-        const cName = clients.find(c => c.id === b.clientId)?.name || 'Unknown';
-        const dr    = b.dailyRate || (b.weeklyRate ? b.weeklyRate / (b.daysOfWeek?.length || 5) : 0);
-        const days  = periodDays.filter(d => (b.daysOfWeek || []).includes(DAY_FULL[d.getDay()]));
-        const exp   = days.length * dr;
+        const cName     = clients.find(c => c.id === b.clientId)?.name || 'Unknown';
+        // weeklyRate is the source of truth (client page edits always update it).
+        const daysCount = b.daysOfWeek?.length || 5;
+        const dr        = b.weeklyRate ? b.weeklyRate / daysCount : (b.dailyRate || 0);
+        const days      = periodDays.filter(d => (b.daysOfWeek || []).includes(DAY_FULL[d.getDay()]));
+        const exp       = days.length * dr;
         expected += exp;
         (byClient[b.clientId] ??= { name: cName, expected: 0, actual: 0 }).expected += exp;
       });
@@ -229,7 +298,8 @@ const Payroll: React.FC = () => {
       .forEach(l => {
         const booking = bookings.find(b => b.id === l.bookingId);
         if (!booking) return;
-        const dr = booking.dailyRate || (booking.weeklyRate ? booking.weeklyRate / (booking.daysOfWeek?.length || 5) : 0);
+        const daysCount = booking.daysOfWeek?.length || 5;
+        const dr        = booking.weeklyRate ? booking.weeklyRate / daysCount : (booking.dailyRate || 0);
         actual += dr;
         if (byClient[booking.clientId]) byClient[booking.clientId].actual += dr;
       });
@@ -243,6 +313,8 @@ const Payroll: React.FC = () => {
 
   return (
     <div className="print:bg-white">
+      {/* Wrapper: hidden during stub print or print-all so only the PayStubs show */}
+      <div className={(printStubDriver || printAllStubs) ? 'print:hidden' : ''}>
       {/* Header */}
       <div className="bg-gradient-to-r from-amber-500 to-orange-500 px-8 py-6 flex items-start justify-between print:hidden">
         <div>
@@ -269,8 +341,8 @@ const Payroll: React.FC = () => {
         )}
       </div>
 
-      {/* Print-only header */}
-      <div className="hidden print:block px-8 pt-6 pb-2 border-b border-slate-300">
+      {/* Print-only header (only for global print, not stub/print-all print) */}
+      <div className={(printStubDriver || printAllStubs) ? 'hidden' : 'hidden print:block px-8 pt-6 pb-2 border-b border-slate-300'}>
         <h1 className="text-xl font-bold text-slate-800">
           KIDZ Transportation — {tab === 'payroll' ? 'Payroll' : 'Revenue'} Report
         </h1>
@@ -325,10 +397,10 @@ const Payroll: React.FC = () => {
           ↺ Refresh
         </button>
         <button
-          onClick={() => window.print()}
-          className="ml-auto flex items-center gap-1.5 text-sm font-medium text-slate-600 hover:text-slate-800 border border-slate-300 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors"
+          onClick={() => { setPrintAllStubs(true); setTimeout(() => { window.print(); setPrintAllStubs(false); }, 100); }}
+          className="ml-auto flex items-center gap-1.5 text-sm font-semibold bg-amber-500 hover:bg-amber-600 text-white px-4 py-1.5 rounded-lg transition-colors shadow-sm"
         >
-          <Printer size={15} /> Print
+          <Printer size={15} /> Print All Pay Stubs
         </button>
       </div>
 
@@ -344,10 +416,8 @@ const Payroll: React.FC = () => {
           ) : driversInPeriod.length === 0 ? (
             <div className="text-center py-24">
               <DollarSign size={48} className="mx-auto text-slate-300 mb-4" />
-              <p className="text-slate-600 font-semibold">No payroll entries for this period</p>
-              <p className="text-slate-400 text-sm mt-1">
-                Route assignments with a week-start inside this period will appear here.
-              </p>
+              <p className="text-slate-600 font-semibold">No drivers found</p>
+              <p className="text-slate-400 text-sm mt-1">Add drivers to see payroll entries here.</p>
             </div>
           ) : (
             <div className="space-y-6">
@@ -394,9 +464,24 @@ const Payroll: React.FC = () => {
                             onClick={() => markAllPaid(driver.id)}
                             className="flex items-center gap-1 bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors print:hidden"
                           >
-                            <Check size={12} /> Pay All
+                            <Check size={12} /> Mark Paid
                           </button>
                         )}
+                        {driver.stripeConnectPayoutsEnabled &&
+                          (byDriver[driver.id] || []).some(a => a.status === 'pending') && (
+                          <button
+                            onClick={() => openPayoutModal(driver)}
+                            className="flex items-center gap-1 bg-violet-600 hover:bg-violet-700 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors print:hidden"
+                          >
+                            <Zap size={12} /> Stripe Payout
+                          </button>
+                        )}
+                        <button
+                          onClick={() => setPrintStubDriver(driver)}
+                          className="flex items-center gap-1 bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors print:hidden shadow-sm"
+                        >
+                          <Printer size={12} /> Print Stub
+                        </button>
                       </div>
                     </div>
 
@@ -419,8 +504,55 @@ const Payroll: React.FC = () => {
                           </thead>
                           <tbody>
                             {dAssignments.map(a => {
-                              const booking = bookings.find(b => b.id === a.bookingId);
-                              const client  = booking ? clients.find(c => c.id === booking.clientId) : null;
+                              const booking    = bookings.find(b => b.id === a.bookingId);
+                              const client     = booking ? clients.find(c => c.id === booking.clientId) : null;
+                              const aWeekStart = toDate(a.weekStart);
+                              const aMonday    = fmt(startOfWeek(aWeekStart, { weekStartsOn: 1 }));
+                              const isThisWeek = aMonday === fmt(range.start);
+
+                              // Pending from a different week → compact "past due" row (no day grid)
+                              if (!isThisWeek) {
+                                return (
+                                  <tr key={a.id} className="border-t border-slate-50 bg-amber-50/40">
+                                    <td className="pr-4 py-2.5">
+                                      <div className="font-medium text-slate-700 truncate max-w-[120px]">
+                                        {client?.name || 'Unknown'}
+                                      </div>
+                                      <div className="text-[10px] text-amber-600 font-semibold mt-0.5">
+                                        Wk of {format(startOfWeek(aWeekStart, { weekStartsOn: 1 }), 'MMM d')}
+                                      </div>
+                                    </td>
+                                    <td colSpan={periodDays.length} className="py-2.5 px-2">
+                                      <span className="inline-flex items-center gap-1 text-xs bg-amber-100 text-amber-700 px-2.5 py-1 rounded-full font-medium">
+                                        Past due · {(a.daysWorked || []).map(d => d.slice(0, 2)).join(', ')}
+                                      </span>
+                                    </td>
+                                    <td className="text-right py-2.5 pl-3 whitespace-nowrap">
+                                      <div className="font-bold text-slate-700">${(a.weeklyPayout || 0).toFixed(2)}</div>
+                                      <div className="text-[10px] text-slate-400">weekly</div>
+                                    </td>
+                                    <td className="py-2.5 pl-3 print:hidden">
+                                      {a.status === 'paid' ? (
+                                        <span className="flex items-center gap-1 text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-medium whitespace-nowrap">
+                                          <CheckCircle size={11} /> Paid
+                                        </span>
+                                      ) : (
+                                        <button
+                                          onClick={() => markPaid(a.id)}
+                                          disabled={marking === a.id}
+                                          className="flex items-center gap-1 text-xs bg-amber-100 hover:bg-amber-200 text-amber-800 px-2 py-0.5 rounded-full font-semibold transition-colors disabled:opacity-60 whitespace-nowrap"
+                                        >
+                                          {marking === a.id
+                                            ? <span className="w-3 h-3 border border-amber-700 border-t-transparent rounded-full animate-spin" />
+                                            : <Check size={11} />}
+                                          Mark Paid
+                                        </button>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              }
+
                               const aActual = actualPayForAssignment(a);
                               return (
                                 <tr key={a.id} className="border-t border-slate-50">
@@ -522,6 +654,144 @@ const Payroll: React.FC = () => {
               })}
             </div>
           )}
+        </div>
+      )}
+
+      </div>{/* end print:hidden wrapper */}
+
+      {/* ── STRIPE PAYOUT MODAL ─────────────────────────────────────────── */}
+      {payoutModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                <Zap size={18} className="text-violet-600" /> Stripe Payout
+              </h2>
+              <button onClick={() => setPayoutModal(null)} className="p-1.5 hover:bg-slate-100 rounded-lg">
+                <X size={16} className="text-slate-500" />
+              </button>
+            </div>
+            <p className="text-sm text-slate-600 mb-1">
+              Sending to <span className="font-semibold">{payoutModal.driverName}</span>
+            </p>
+            <p className="text-xs text-slate-400 mb-4">
+              Funds transfer via Stripe Connect · pending assignments will be marked paid
+            </p>
+            <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
+              Amount ($)
+            </label>
+            <input
+              type="number"
+              min="0.01"
+              step="0.01"
+              value={payoutAmount}
+              onChange={e => setPayoutAmount(e.target.value)}
+              className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 mb-4"
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={() => setPayoutModal(null)}
+                className="flex-1 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-xl py-2.5 text-sm font-semibold transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={issueStripePayout}
+                disabled={issuingPayout}
+                className="flex-1 bg-violet-600 hover:bg-violet-700 text-white rounded-xl py-2.5 text-sm font-semibold flex items-center justify-center gap-2 disabled:opacity-60 transition-colors"
+              >
+                {issuingPayout
+                  ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  : <Zap size={14} />}
+                {issuingPayout ? 'Sending…' : `Send $${payoutAmount}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── PRINT STUB MODAL ────────────────────────────────────────────── */}
+      {printStubDriver && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 print:hidden">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                <Printer size={18} className="text-slate-600" /> Print Pay Stub
+              </h2>
+              <button onClick={() => setPrintStubDriver(null)} className="p-1.5 hover:bg-slate-100 rounded-lg">
+                <X size={16} className="text-slate-500" />
+              </button>
+            </div>
+            <p className="text-sm text-slate-600 mb-4">
+              Print a professional pay stub for <span className="font-semibold">{printStubDriver.name}</span>
+            </p>
+            <PayStub
+              driver={printStubDriver}
+              assignments={byDriver[printStubDriver.id] || []}
+              bookings={bookings}
+              clients={clients}
+              periodLabel={range.label}
+              periodStart={range.start}
+              periodEnd={range.end}
+              getLog={getLog}
+              dailyRateFor={dailyRateFor}
+              printedAt={new Date()}
+            />
+            <div className="flex gap-2 mt-4">
+              <button
+                onClick={() => setPrintStubDriver(null)}
+                className="flex-1 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-xl py-2.5 text-sm font-semibold transition-colors"
+              >
+                Close
+              </button>
+              <button
+                onClick={() => window.print()}
+                className="flex-1 bg-slate-700 hover:bg-slate-800 text-white rounded-xl py-2.5 text-sm font-semibold flex items-center justify-center gap-2 transition-colors"
+              >
+                <Printer size={14} /> Print Now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Print-only full-page PayStub */}
+      {printStubDriver && (
+        <div className="hidden print:block p-8">
+          <PayStub
+            driver={printStubDriver}
+            assignments={byDriver[printStubDriver.id] || []}
+            bookings={bookings}
+            clients={clients}
+            periodLabel={range.label}
+            periodStart={range.start}
+            periodEnd={range.end}
+            getLog={getLog}
+            dailyRateFor={dailyRateFor}
+            printedAt={new Date()}
+          />
+        </div>
+      )}
+
+      {/* Print-only ALL driver PayStubs (when "Print All Pay Stubs" clicked) */}
+      {printAllStubs && (
+        <div className="hidden print:block">
+          {driversInPeriod.map((driver, idx) => (
+            <div key={driver.id} className={idx > 0 ? 'print:break-before-page' : ''}>
+              <PayStub
+                driver={driver}
+                assignments={byDriver[driver.id] || []}
+                bookings={bookings}
+                clients={clients}
+                periodLabel={range.label}
+                periodStart={range.start}
+                periodEnd={range.end}
+                getLog={getLog}
+                dailyRateFor={dailyRateFor}
+                printedAt={new Date()}
+              />
+            </div>
+          ))}
         </div>
       )}
 
@@ -653,8 +923,10 @@ const Payroll: React.FC = () => {
                     value: routeLogs.filter(l => !l.ran && isWithinInterval(new Date(l.date + 'T00:00:00'), { start: range.start, end: range.end })).length,
                     color: 'text-red-500',
                   },
-                  { label: 'Expected revenue', value: `$${revenueStats.expected.toFixed(2)}`, color: 'text-slate-800' },
-                  { label: 'Actual revenue',   value: `$${revenueStats.actual.toFixed(2)}`,   color: 'text-emerald-600' },
+                  { label: 'Expected revenue',          value: `$${revenueStats.expected.toFixed(2)}`,            color: 'text-slate-800' },
+                  { label: 'Actual revenue',            value: `$${revenueStats.actual.toFixed(2)}`,              color: 'text-emerald-600' },
+                  { label: 'Driver cost (70% of actual)', value: `$${(revenueStats.actual * 0.70).toFixed(2)}`,   color: 'text-amber-600' },
+                  { label: 'Net to business (30%)',      value: `$${(revenueStats.actual * 0.30).toFixed(2)}`,   color: 'text-violet-700' },
                 ].map(row => (
                   <div key={row.label} className="flex justify-between items-center py-2 border-b border-slate-100">
                     <span className="text-sm text-slate-600">{row.label}</span>

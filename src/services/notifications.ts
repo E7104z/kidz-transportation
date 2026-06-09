@@ -7,6 +7,7 @@ import {
   query,
   where,
   orderBy,
+  limit,
   onSnapshot,
   type Unsubscribe,
 } from 'firebase/firestore';
@@ -59,6 +60,7 @@ export function subscribeToNotifications(
     collection(db, 'notifications'),
     where('recipientUid', '==', uid),
     orderBy('createdAt', 'desc'),
+    limit(50),
   );
   return onSnapshot(q, snap => {
     const items = snap.docs.map(d => ({ id: d.id, ...d.data() })) as AppNotification[];
