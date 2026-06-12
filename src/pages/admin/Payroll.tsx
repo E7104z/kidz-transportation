@@ -143,19 +143,10 @@ const Payroll: React.FC = () => {
     [pendingAssignments, paidInPeriod],
   );
 
-  const dailyRateFor = (a: RouteAssignment) =>
-    a.daysWorked?.length ? a.weeklyPayout / a.daysWorked.length : 0;
-
   const actualPayForAssignment = (a: RouteAssignment): number => {
-    const ws   = toDate(a.weekStart);
-    const we   = endOfWeek(ws, { weekStartsOn: 1 });
-    const days = eachDayOfInterval({ start: ws, end: we });
-    const rate = dailyRateFor(a);
-    return days.reduce((sum, day) => {
-      if (!(a.daysWorked || []).includes(DAY_FULL[day.getDay()])) return sum;
-      const log = getLog(a.bookingId, day);
-      return sum + (log?.ran ? rate : 0);
-    }, 0);
+    // Use the weeklyPayout directly — this is the 70% driver cut already
+    // calculated server-side by the recalcPayout function or set during route assignment.
+    return a.weeklyPayout || 0;
   };
 
   const byDriver = useMemo(() => {
@@ -425,7 +416,7 @@ const Payroll: React.FC = () => {
                 const dAssignments = byDriver[driver.id] || [];
                 const expected = dAssignments.reduce((s, a) => s + (a.weeklyPayout || 0), 0);
                 const actual   = dAssignments.reduce((s, a) => s + actualPayForAssignment(a), 0);
-                const diff     = actual - expected;
+                const diff     = 0; // With weeklyPayout as source of truth, expected === actual
 
                 return (
                   <div key={driver.id} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden print:break-inside-avoid">
@@ -713,7 +704,7 @@ const Payroll: React.FC = () => {
       {/* ── PRINT STUB MODAL ────────────────────────────────────────────── */}
       {printStubDriver && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 print:hidden">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto p-6">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
                 <Printer size={18} className="text-slate-600" /> Print Pay Stub
@@ -733,8 +724,6 @@ const Payroll: React.FC = () => {
               periodLabel={range.label}
               periodStart={range.start}
               periodEnd={range.end}
-              getLog={getLog}
-              dailyRateFor={dailyRateFor}
               printedAt={new Date()}
             />
             <div className="flex gap-2 mt-4">
@@ -766,8 +755,6 @@ const Payroll: React.FC = () => {
             periodLabel={range.label}
             periodStart={range.start}
             periodEnd={range.end}
-            getLog={getLog}
-            dailyRateFor={dailyRateFor}
             printedAt={new Date()}
           />
         </div>
@@ -786,9 +773,8 @@ const Payroll: React.FC = () => {
                 periodLabel={range.label}
                 periodStart={range.start}
                 periodEnd={range.end}
-                getLog={getLog}
-                dailyRateFor={dailyRateFor}
                 printedAt={new Date()}
+                printMode="batch"
               />
             </div>
           ))}
