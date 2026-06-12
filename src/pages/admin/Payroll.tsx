@@ -98,6 +98,16 @@ const Payroll: React.FC = () => {
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  // Escape key closes print stub modal
+  useEffect(() => {
+    if (!printStubDriver) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPrintStubDriver(null);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [printStubDriver]);
+
   const handleModeChange = (m: PeriodMode) => { setMode(m); setOffset(0); };
 
   const range = useMemo(() => buildRange(mode, offset), [mode, offset]);
@@ -703,41 +713,59 @@ const Payroll: React.FC = () => {
 
       {/* ── PRINT STUB MODAL ────────────────────────────────────────────── */}
       {printStubDriver && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 print:hidden">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto p-6">
-            <div className="flex items-center justify-between mb-4">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 print:hidden"
+          onClick={() => setPrintStubDriver(null)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-xl w-full max-w-4xl flex flex-col"
+            style={{ maxHeight: '90vh' }}
+            onClick={e => e.stopPropagation()}
+            onKeyDown={undefined}
+          >
+            {/* Sticky header */}
+            <div className="flex items-center justify-between px-6 pt-5 pb-3 border-b border-slate-200 flex-shrink-0">
               <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-                <Printer size={18} className="text-slate-600" /> Print Pay Stub
+                <Printer size={18} className="text-slate-600" /> Pay Stub Preview
               </h2>
-              <button onClick={() => setPrintStubDriver(null)} className="p-1.5 hover:bg-slate-100 rounded-lg">
-                <X size={16} className="text-slate-500" />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => window.print()}
+                  className="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-800 text-white rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors"
+                >
+                  <Printer size={14} /> Print
+                </button>
+                <button
+                  onClick={() => setPrintStubDriver(null)}
+                  className="p-1.5 hover:bg-slate-100 rounded-lg"
+                  title="Close (Esc)"
+                >
+                  <X size={18} className="text-slate-500" />
+                </button>
+              </div>
             </div>
-            <p className="text-sm text-slate-600 mb-4">
-              Print a professional pay stub for <span className="font-semibold">{printStubDriver.name}</span>
-            </p>
-            <PayStub
-              driver={printStubDriver}
-              assignments={byDriver[printStubDriver.id] || []}
-              bookings={bookings}
-              clients={clients}
-              periodLabel={range.label}
-              periodStart={range.start}
-              periodEnd={range.end}
-              printedAt={new Date()}
-            />
-            <div className="flex gap-2 mt-4">
+            {/* Scrollable content */}
+            <div className="flex-1 overflow-y-auto px-6 py-4">
+              <PayStub
+                driver={printStubDriver}
+                assignments={byDriver[printStubDriver.id] || []}
+                bookings={bookings}
+                clients={clients}
+                periodLabel={range.label}
+                periodStart={range.start}
+                periodEnd={range.end}
+                printedAt={new Date()}
+                preview
+              />
+            </div>
+            {/* Sticky footer */}
+            <div className="flex items-center justify-between px-6 py-3 border-t border-slate-200 flex-shrink-0 bg-slate-50 rounded-b-2xl">
+              <span className="text-xs text-slate-400">Press <kbd className="px-1.5 py-0.5 bg-slate-200 rounded text-xs font-mono">Esc</kbd> or click outside to close</span>
               <button
                 onClick={() => setPrintStubDriver(null)}
-                className="flex-1 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-xl py-2.5 text-sm font-semibold transition-colors"
+                className="border border-slate-200 text-slate-600 hover:bg-white rounded-lg px-4 py-1.5 text-sm font-semibold transition-colors"
               >
                 Close
-              </button>
-              <button
-                onClick={() => window.print()}
-                className="flex-1 bg-slate-700 hover:bg-slate-800 text-white rounded-xl py-2.5 text-sm font-semibold flex items-center justify-center gap-2 transition-colors"
-              >
-                <Printer size={14} /> Print Now
               </button>
             </div>
           </div>
