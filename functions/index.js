@@ -621,6 +621,17 @@ exports.createCheckoutSession = functions.https.onCall(async (data, context) => 
     throw new functions.https.HttpsError('failed-precondition', 'This invoice is already paid.');
   }
 
+  // Validate the charge amount. Stripe rejects amounts < $0.50, and a missing
+  // or non-positive amount means the invoice is malformed — fail loudly with a
+  // clear message instead of letting Stripe throw a generic error.
+  const amount = Number(invoice.totalAmount);
+  if (!isFinite(amount) || amount <= 0) {
+    throw new functions.https.HttpsError('failed-precondition', 'This invoice has no amount due.');
+  }
+  if (amount < 0.5) {
+    throw new functions.https.HttpsError('failed-precondition', 'Invoice amount is below the minimum that can be charged.');
+  }
+
   // Verify caller owns this invoice
   const userSnap = await db.collection('users').doc(uid).get();
   const linkedId = userSnap.data()?.linkedId;
@@ -628,58 +639,71 @@ exports.createCheckoutSession = functions.https.onCall(async (data, context) => 
     throw new functions.https.HttpsError('permission-denied', 'Not your invoice.');
   }
 
-  // Get or create Stripe customer
-  const clientSnap = await db.collection('clients').doc(invoice.clientId).get();
-  const client = clientSnap.data();
-  let customerId = client?.stripeCustomerId;
-
-  if (!customerId) {
-    const customer = await getStripe().customers.create({
-      email: client?.email || '',
-      name: client?.name || '',
-      metadata: { clientId: invoice.clientId },
-    });
-    customerId = customer.id;
-    await clientSnap.ref.update({ stripeCustomerId: customerId });
-  }
-
   const baseUrl = process.env.APP_URL || 'https://kidz-transportation.com';
 
-  const session = await getStripe().checkout.sessions.create({
-    customer: customerId,
-    payment_method_types: ['card'],
-    mode: 'payment',
-    line_items: [{
-      price_data: {
-        currency: 'usd',
-        product_data: {
-          name: `KIDZ Transportation — Week of ${invoice.weekOf || invoice.periodStart}`,
-          description: invoice.lineItems?.map(li => li.description).join(', ') || 'Weekly transportation service',
+  try {
+    // Get or create Stripe customer
+    const clientSnap = await db.collection('clients').doc(invoice.clientId).get();
+    const client = clientSnap.data();
+    let customerId = client?.stripeCustomerId;
+
+    if (!customerId) {
+      const customer = await getStripe().customers.create({
+        email: client?.email || '',
+        name: client?.name || '',
+        metadata: { clientId: invoice.clientId },
+      });
+      customerId = customer.id;
+      await clientSnap.ref.update({ stripeCustomerId: customerId });
+    }
+
+    const session = await getStripe().checkout.sessions.create({
+      customer: customerId,
+      payment_method_types: ['card'],
+      mode: 'payment',
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          product_data: {
+            name: `KIDZ Transportation — Week of ${invoice.weekOf || invoice.periodStart}`,
+            description: invoice.lineItems?.map(li => li.description).join(', ') || 'Weekly transportation service',
+          },
+          unit_amount: Math.round(amount * 100), // cents
         },
-        unit_amount: Math.round(invoice.totalAmount * 100), // cents
-      },
-      quantity: 1,
-    }],
-    metadata: {
-      invoiceId: invoiceId,
-      clientId: invoice.clientId,
-    },
-    success_url: `${baseUrl}/parent/billing?paid=${invoiceId}`,
-    cancel_url:  `${baseUrl}/parent/billing?cancelled=true`,
-    payment_intent_data: {
-      // 'off_session' saves the card to the Stripe customer so auto-pay can
-      // charge it later without the parent being present.
-      setup_future_usage: 'off_session',
+        quantity: 1,
+      }],
       metadata: {
         invoiceId: invoiceId,
         clientId: invoice.clientId,
       },
-    },
-  });
+      success_url: `${baseUrl}/parent/billing?paid=${invoiceId}`,
+      cancel_url:  `${baseUrl}/parent/billing?cancelled=true`,
+      payment_intent_data: {
+        // 'off_session' saves the card to the Stripe customer so auto-pay can
+        // charge it later without the parent being present.
+        setup_future_usage: 'off_session',
+        metadata: {
+          invoiceId: invoiceId,
+          clientId: invoice.clientId,
+        },
+      },
+    });
 
-  await inv.ref.update({ stripeSessionId: session.id });
+    await inv.ref.update({ stripeSessionId: session.id });
 
-  return { url: session.url };
+    if (!session.url) {
+      throw new functions.https.HttpsError('internal', 'Stripe did not return a checkout URL. Please try again.');
+    }
+
+    return { url: session.url };
+  } catch (err) {
+    if (err instanceof functions.https.HttpsError) throw err;
+    console.error('createCheckoutSession failed:', err);
+    throw new functions.https.HttpsError(
+      'internal',
+      'We could not start the payment session. Please try again in a moment, or contact KIDZ Transportation if it persists.',
+    );
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -715,77 +739,79 @@ exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
     const invoiceId = session.metadata?.invoiceId;
-    if (!invoiceId) { return res.status(200).send('No invoiceId in metadata'); }
 
-    const invRef = db.collection('invoices').doc(invoiceId);
-    const invSnap = await invRef.get();
-    if (!invSnap.exists) { return res.status(200).send('Invoice not found'); }
-
-    if (invSnap.data().status !== 'paid') {
-      await invRef.update({
-        status: 'paid',
-        paidAt: now,
-        stripePaymentIntentId: session.payment_intent || null,
-        stripeSessionId: session.id,
-      });
-
-      await db.collection('auditLog').add({
-        action: 'invoice_paid_stripe',
-        collection: 'invoices',
-        docId: invoiceId,
-        clientId: session.metadata?.clientId,
-        amount: invSnap.data().totalAmount,
-        stripeSessionId: session.id,
-        timestamp: now,
-      });
-    }
-
-    // Attach payment method to the Stripe customer as the default so
-    // subsequent auto-pay off-session charges always have a usable PM.
-    if (session.customer && session.payment_intent) {
-      try {
-        const pi = await getStripe().paymentIntents.retrieve(session.payment_intent);
-        if (pi.payment_method) {
-          const pm = await getStripe().paymentMethods.retrieve(pi.payment_method);
-          // Attach if not already attached to this customer
-          if (!pm.customer) {
-            await getStripe().paymentMethods.attach(pm.id, { customer: session.customer });
-          }
-          // Set as the customer's default invoice payment method
-          await getStripe().customers.update(session.customer, {
-            invoice_settings: { default_payment_method: pm.id },
+    // ── Payment-mode session: an invoice was paid ────────────────────────────
+    // Guarded by invoiceId presence so that setup-mode sessions (card updates,
+    // which carry no invoiceId) fall through to the setup handler below and
+    // still reach the idempotency write at the end of the function.
+    if (invoiceId) {
+      const invRef = db.collection('invoices').doc(invoiceId);
+      const invSnap = await invRef.get();
+      if (invSnap.exists) {
+        if (invSnap.data().status !== 'paid') {
+          await invRef.update({
+            status: 'paid',
+            paidAt: now,
+            stripePaymentIntentId: session.payment_intent || null,
+            stripeSessionId: session.id,
           });
-          const clientId = session.metadata?.clientId;
-          if (clientId) {
-            await db.collection('clients').doc(clientId).update({
-              paymentMethodLast4: pm.card?.last4 || '',
-              paymentMethodBrand: pm.card?.brand || '',
-            });
-          }
-          // Notify parent that payment was received
-          const userSnap = await db.collection('users')
-            .where('linkedId', '==', session.metadata?.clientId).limit(1).get();
-          if (!userSnap.empty) {
-            const invData = invSnap.data();
-            await createNotification({
-              recipientUid: userSnap.docs[0].id,
-              audience:     'parent',
-              type:         'invoice_paid',
-              title:        'Payment Received',
-              body:         `Your payment of $${invData?.totalAmount?.toFixed(2) ?? '0.00'} for the week of ${invData?.weekOf || invData?.periodStart || 'N/A'} has been received. Thank you!`,
-              clientId:     session.metadata?.clientId,
-              invoiceId:    invoiceId,
-              priority:     'normal',
-            });
-          }
-        }
-      } catch (e) { console.warn('Could not save payment method details:', e.message); }
-    }
-  }
 
-  // Handle setup mode completion — parent updated their saved card
-  if (event.type === 'checkout.session.completed') {
-    const session = event.data.object;
+          await db.collection('auditLog').add({
+            action: 'invoice_paid_stripe',
+            collection: 'invoices',
+            docId: invoiceId,
+            clientId: session.metadata?.clientId,
+            amount: invSnap.data().totalAmount,
+            stripeSessionId: session.id,
+            timestamp: now,
+          });
+        }
+
+        // Attach payment method to the Stripe customer as the default so
+        // subsequent auto-pay off-session charges always have a usable PM.
+        if (session.customer && session.payment_intent) {
+          try {
+            const pi = await getStripe().paymentIntents.retrieve(session.payment_intent);
+            if (pi.payment_method) {
+              const pm = await getStripe().paymentMethods.retrieve(pi.payment_method);
+              // Attach if not already attached to this customer
+              if (!pm.customer) {
+                await getStripe().paymentMethods.attach(pm.id, { customer: session.customer });
+              }
+              // Set as the customer's default invoice payment method
+              await getStripe().customers.update(session.customer, {
+                invoice_settings: { default_payment_method: pm.id },
+              });
+              const clientId = session.metadata?.clientId;
+              if (clientId) {
+                await db.collection('clients').doc(clientId).update({
+                  paymentMethodLast4: pm.card?.last4 || '',
+                  paymentMethodBrand: pm.card?.brand || '',
+                });
+              }
+              // Notify parent that payment was received
+              const userSnap = await db.collection('users')
+                .where('linkedId', '==', session.metadata?.clientId).limit(1).get();
+              if (!userSnap.empty) {
+                const invData = invSnap.data();
+                await createNotification({
+                  recipientUid: userSnap.docs[0].id,
+                  audience:     'parent',
+                  type:         'invoice_paid',
+                  title:        'Payment Received',
+                  body:         `Your payment of $${invData?.totalAmount?.toFixed(2) ?? '0.00'} for the week of ${invData?.weekOf || invData?.periodStart || 'N/A'} has been received. Thank you!`,
+                  clientId:     session.metadata?.clientId,
+                  invoiceId:    invoiceId,
+                  priority:     'normal',
+                });
+              }
+            }
+          } catch (e) { console.warn('Could not save payment method details:', e.message); }
+        }
+      }
+    }
+
+    // ── Setup-mode session: parent saved/updated their card ──────────────────
     if (session.mode === 'setup' && session.setup_intent && session.customer) {
       try {
         const si = await getStripe().setupIntents.retrieve(session.setup_intent);
@@ -834,34 +860,47 @@ exports.createSetupSession = functions.https.onCall(async (data, context) => {
   const linkedId = userSnap.data()?.linkedId;
   if (!linkedId) throw new functions.https.HttpsError('not-found', 'No linked client.');
 
-  const clientSnap = await db.collection('clients').doc(linkedId).get();
-  const client = clientSnap.data();
-  let customerId = client?.stripeCustomerId;
-
-  if (!customerId) {
-    const customer = await getStripe().customers.create({
-      email: client?.email || '',
-      name:  client?.name  || '',
-      metadata: { clientId: linkedId },
-    });
-    customerId = customer.id;
-    await clientSnap.ref.update({ stripeCustomerId: customerId });
-  }
-
   const baseUrl = process.env.APP_URL || 'https://kidz-transportation.com';
 
-  const session = await getStripe().checkout.sessions.create({
-    customer: customerId,
-    payment_method_types: ['card'],
-    mode: 'setup',
-    setup_intent_data: {
-      metadata: { clientId: linkedId },
-    },
-    success_url: `${baseUrl}/parent/billing?card_updated=1`,
-    cancel_url:  `${baseUrl}/parent/billing`,
-  });
+  try {
+    const clientSnap = await db.collection('clients').doc(linkedId).get();
+    const client = clientSnap.data();
+    let customerId = client?.stripeCustomerId;
 
-  return { url: session.url };
+    if (!customerId) {
+      const customer = await getStripe().customers.create({
+        email: client?.email || '',
+        name:  client?.name  || '',
+        metadata: { clientId: linkedId },
+      });
+      customerId = customer.id;
+      await clientSnap.ref.update({ stripeCustomerId: customerId });
+    }
+
+    const session = await getStripe().checkout.sessions.create({
+      customer: customerId,
+      payment_method_types: ['card'],
+      mode: 'setup',
+      setup_intent_data: {
+        metadata: { clientId: linkedId },
+      },
+      success_url: `${baseUrl}/parent/billing?card_updated=1`,
+      cancel_url:  `${baseUrl}/parent/billing`,
+    });
+
+    if (!session.url) {
+      throw new functions.https.HttpsError('internal', 'Stripe did not return a setup URL. Please try again.');
+    }
+
+    return { url: session.url };
+  } catch (err) {
+    if (err instanceof functions.https.HttpsError) throw err;
+    console.error('createSetupSession failed:', err);
+    throw new functions.https.HttpsError(
+      'internal',
+      'We could not start the card-update session. Please try again in a moment.',
+    );
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
