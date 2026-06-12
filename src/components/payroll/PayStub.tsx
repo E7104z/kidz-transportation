@@ -14,6 +14,8 @@ export interface PayStubProps {
   printedAt: Date;
   /** 'single' (default): apply visibility CSS to hide sidebar etc. 'batch': skip it, parent handles visibility */
   printMode?: 'single' | 'batch';
+  /** If true, renders at larger scale for on-screen preview instead of print */
+  preview?: boolean;
 }
 
 const ONES  = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine'];
@@ -132,6 +134,7 @@ const PayStub: React.FC<PayStubProps> = ({
   driver, assignments, bookings, clients,
   periodLabel, periodStart, periodEnd, printedAt,
   printMode = 'single',
+  preview = false,
 }) => {
   const grossPay = useMemo(
     () => assignments.reduce((s, a) => s + (a.weeklyPayout || 0), 0),
@@ -186,7 +189,7 @@ const PayStub: React.FC<PayStubProps> = ({
         `}</style>
       )}
 
-      <div className="paystub-print-root" style={S.root}>
+      <div className="paystub-print-root" style={{ ...S.root, ...(preview ? { transform: 'scale(1.05)', transformOrigin: 'top center' } : {}) }}>
 
         {/* ══ CHECK ══════════════════════════════════════════════════════════ */}
         <div style={S.check}>
