@@ -36,11 +36,25 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       fetch(event.request)
         .then((response) => {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+          if (response.ok && response.type !== 'opaqueredirect') {
+            const clone = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+          }
           return response;
         })
-        .catch(() => caches.match(event.request))
+        .catch(() => {
+          // Try exact match first, then fall back to cached index.html (SPA shell)
+          return caches.match(event.request).then((cached) =>
+            cached || caches.match('/index.html').then((shell) => {
+              if (shell) return shell;
+              return new Response('Offline — please check your connection.', {
+                status: 503,
+                statusText: 'Service Unavailable',
+                headers: { 'Content-Type': 'text/html' },
+              });
+            })
+          );
+        })
     );
     return;
   }
