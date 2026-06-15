@@ -38,3 +38,13 @@ export function computeWeeklyCharge(
 
   return { weekly, daily, driver, admin: adminCut };
 }
+
+/** Format a number as dollars: #,##0.00 */
+export function formatDollar(value: number): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
+}
