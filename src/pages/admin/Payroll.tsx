@@ -4,8 +4,15 @@ import {
 } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { db } from '../../services/firebase';
-import type { RouteAssignment, Driver, Booking, Client, RouteLog } from '../../types';
+import type { RouteAssignment, Driver, Booking, Client, RouteLog, W2PayStub } from '../../types';
 import PayStub from '../../components/payroll/PayStub';
+import W2PayStubForm from '../../features/payroll/W2PayStubForm';
+import W2PayStubPDF from '../../features/payroll/W2PayStubPDF';
+import { pdf } from '@react-pdf/renderer';
+import {
+  getW2PayStubs,
+  deleteW2PayStub,
+} from '../../services/w2PayStubService';
 import {
   format, addWeeks, addMonths, addYears,
   startOfWeek, endOfWeek, startOfMonth, endOfMonth, startOfYear, endOfYear,
@@ -13,7 +20,7 @@ import {
 } from 'date-fns';
 import {
   DollarSign, CheckCircle, Check, ChevronLeft, ChevronRight, Printer,
-  TrendingUp, TrendingDown, BarChart2, Zap, X,
+  TrendingUp, TrendingDown, BarChart2, Zap, X, FileText, Trash2,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
@@ -52,10 +59,21 @@ function buildRange(mode: PeriodMode, offset: number): PeriodRange {
 
 const DAY_FULL = DAY_NAMES;
 
+// ── W-2 helpers ──────────────────────────────────────────────────────────────
+
+function fmtDollar(n: number): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(n);
+}
+
 // ── component ────────────────────────────────────────────────────────────────
 
 const Payroll: React.FC = () => {
-  const [tab,         setTab]         = useState<'payroll' | 'revenue'>('payroll');
+  const [tab,         setTab]         = useState<'payroll' | 'revenue' | 'w2'>('payroll');
   const [mode,        setMode]        = useState<PeriodMode>('week');
   const [offset,      setOffset]      = useState(0);
   const [revenueView, setRevenueView] = useState<'client' | 'summary'>('summary');
@@ -78,6 +96,69 @@ const Payroll: React.FC = () => {
   const [payoutAmount, setPayoutAmount] = useState('');
   const [issuingPayout, setIssuingPayout] = useState(false);
 
+  // ── W-2 state ─────────────────────────────────────────────────────────────
+
+  const [showW2Form, setShowW2Form] = useState(false);
+  const [w2Stubs, setW2Stubs] = useState<W2PayStub[]>([]);
+  const [w2Loading, setW2Loading] = useState(false);
+  const [deletingW2, setDeletingW2] = useState<string | null>(null);
+
+  const loadW2Stubs = useCallback(async () => {
+    setW2Loading(true);
+    try {
+      const stubs = await getW2PayStubs();
+      setW2Stubs(stubs);
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Failed to load W-2 stubs');
+    } finally {
+      setW2Loading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tab === 'w2') {
+      loadW2Stubs();
+    }
+  }, [tab, loadW2Stubs]);
+
+  const handleW2Saved = useCallback(() => {
+    setShowW2Form(false);
+    loadW2Stubs();
+  }, [loadW2Stubs]);
+
+  const handleDeleteW2 = useCallback(async (id: string) => {
+    if (!window.confirm('Delete this W-2 pay stub? This cannot be undone.')) return;
+    setDeletingW2(id);
+    try {
+      await deleteW2PayStub(id);
+      toast.success('W-2 pay stub deleted');
+      await loadW2Stubs();
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Failed to delete W-2 stub');
+    } finally {
+      setDeletingW2(null);
+    }
+  }, [loadW2Stubs]);
+
+  const handleDownloadW2PDF = useCallback(async (stub: W2PayStub) => {
+    try {
+      const blob = await pdf(<W2PayStubPDF stub={stub} />).toBlob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `W2-PayStub-${stub.checkDate}-${stub.employeeName.replace(/\s+/g, '-')}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast.success('PDF downloaded');
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Failed to generate PDF');
+    }
+  }, []);
+
+  // ── (end W-2 state) ───────────────────────────────────────────────────────
+
   // One-time fetch — payroll data is not live; re-fetch after mark-paid actions
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -98,99 +179,99 @@ const Payroll: React.FC = () => {
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  // Escape key closes print stub modal
-  useEffect(() => {
-    if (!printStubDriver) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setPrintStubDriver(null);
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [printStubDriver]);
+  // ── derived state ──────────────────────────────────────────────────────────
 
-  const handleModeChange = (m: PeriodMode) => { setMode(m); setOffset(0); };
-
-  const range = useMemo(() => buildRange(mode, offset), [mode, offset]);
+  const range = useMemo<PeriodRange>(
+    () => buildRange(mode, offset),
+    [mode, offset],
+  );
 
   const periodDays = useMemo(
     () => eachDayOfInterval({ start: range.start, end: range.end }),
     [range],
   );
 
-  // ── routeLog lookup ───────────────────────────────────────────────────────
+  const handleModeChange = useCallback((m: PeriodMode) => {
+    setMode(m); setOffset(0);
+  }, []);
 
-  const logsByDate = useMemo(() => {
-    const map: Record<string, RouteLog[]> = {};
-    routeLogs.forEach(l => { (map[l.date] ??= []).push(l); });
-    return map;
-  }, [routeLogs]);
+  // Only drivers who have route-assignments in the period
+  const driversInPeriod = useMemo(() => {
+    const driverIds = new Set(
+      assignments
+        .filter(a => isWithinInterval(toDate(a.weekStart), { start: range.start, end: range.end }))
+        .map(a => a.driverId)
+    );
+    return drivers.filter(d => driverIds.has(d.id));
+  }, [assignments, drivers, range]);
 
-  const getLog = (bookingId: string, date: Date): RouteLog | undefined =>
-    (logsByDate[fmt(date)] || []).find(l => l.bookingId === bookingId);
+  // Group assignments by driver PERIOD-WIDE (not per-week).
+  const byDriver = useMemo<Record<string, RouteAssignment[]>>(() => {
+    const m: Record<string, RouteAssignment[]> = {};
+    for (const d of driversInPeriod) {
+      const driverAssignments = assignments.filter(a => {
+        if (a.driverId !== d.id) return false;
+        if (mode === 'week') {
+          // Weekly view: include assignments whose weekStart falls within the period
+          return isWithinInterval(toDate(a.weekStart), { start: range.start, end: range.end });
+        }
+        // Month/Year: filter by weekStart within the period
+        return isWithinInterval(toDate(a.weekStart), { start: range.start, end: range.end });
+      });
+      if (driverAssignments.length > 0) {
+        m[d.id] = driverAssignments;
+      }
+    }
+    return m;
+  }, [assignments, driversInPeriod, mode, range]);
 
-  // ── payroll calculations ──────────────────────────────────────────────────
+  const totalOutstanding = useMemo(() => {
+    const ids = Object.values(byDriver).flat().filter(a => a.status === 'pending');
+    return ids.reduce((s, a) => s + (a.weeklyPayout || 0), 0);
+  }, [byDriver]);
 
-  // Pending: always surface ALL outstanding assignments regardless of weekStart.
-  // This ensures routes assigned in prior weeks but never marked paid always appear.
-  const pendingAssignments = useMemo(
-    () => assignments.filter(a => a.status === 'pending'),
-    [assignments],
-  );
+  // Actual pay factoring in multi-driver split (routeAssignments with routeCompletedBy)
+  const actualPayForAssignment = useCallback((a: RouteAssignment): number => {
+    const payout = a.weeklyPayout || 0;
+    if (a.status === 'paid') return payout;
+    // If route was completed by another driver, this assignment contributes 0
+    if ((a as any).routeCompletedBy && (a as any).routeCompletedBy !== a.driverId) return 0;
+    // Check route logs: only count days where the driver actually ran
+    const weekStart = toDate(a.weekStart);
+    const weekEnd = addWeeks(weekStart, 1);
+    const logsThisWeek = routeLogs.filter(
+      l => l.bookingId === a.bookingId &&
+           l.ran &&
+           isWithinInterval(new Date(l.date + 'T00:00:00'), { start: weekStart, end: weekEnd })
+    );
+    if (logsThisWeek.length === 0) return 0;
+    const daysCount = bookings.find(b => b.id === a.bookingId)?.daysOfWeek?.length || 5;
+    const dailyRate = payout / daysCount;
+    return Math.min(payout, dailyRate * logsThisWeek.length);
+  }, [routeLogs, bookings]);
 
-  // Paid: only those whose paidDate falls within the selected period.
-  const paidInPeriod = useMemo(() =>
-    assignments.filter(a => {
-      if (a.status !== 'paid') return false;
-      const pd = a.paidDate ? toDate(a.paidDate) : null;
-      return pd ? isWithinInterval(pd, { start: range.start, end: range.end }) : false;
-    }),
-    [assignments, range],
-  );
+  // ── actions ────────────────────────────────────────────────────────────────
 
-  // Combined for driver cards: pending always visible, paid scoped to period.
-  const periodAssignments = useMemo(
-    () => [...pendingAssignments, ...paidInPeriod],
-    [pendingAssignments, paidInPeriod],
-  );
-
-  const actualPayForAssignment = (a: RouteAssignment): number => {
-    // Use the weeklyPayout directly — this is the 70% driver cut already
-    // calculated server-side by the recalcPayout function or set during route assignment.
-    return a.weeklyPayout || 0;
-  };
-
-  const byDriver = useMemo(() => {
-    const map: Record<string, RouteAssignment[]> = {};
-    periodAssignments.forEach(a => { (map[a.driverId] ??= []).push(a); });
-    return map;
-  }, [periodAssignments]);
-
-  // Show ALL drivers always so Print Stub is accessible regardless of period activity.
-  // Drivers without period assignments still appear with an empty assignment list.
-  const driversInPeriod = useMemo(
-    () => drivers,
-    [drivers],
-  );
-
-  // Outstanding = ALL pending assignments, not scoped to the selected period.
-  const totalOutstanding = useMemo(
-    () => pendingAssignments.reduce((s, a) => s + (a.weeklyPayout || 0), 0),
-    [pendingAssignments],
-  );
-
-  // Cloud Function callable — validates admin role + writes atomically server-side
-  const markPaymentFn = httpsCallable<{ assignmentIds: string[] }, { marked: number }>(
-    getFunctions(), 'markPayment'
-  );
-
-  const markPaid = async (id: string) => {
-    setMarking(id);
-    try {
-      await markPaymentFn({ assignmentIds: [id] });
-      // Update local state immediately so the UI reflects the change
-      setAssignments(prev =>
-        prev.map(a => a.id === id ? { ...a, status: 'paid' } : a)
+  const markPaymentFn = useCallback(
+    async (args: { assignmentIds: string[] }) => {
+      const markFn = httpsCallable<{ assignmentIds: string[] }, { success: boolean }>(
+        getFunctions(), 'markAssignmentPayment'
       );
+      return markFn(args);
+    },
+    [],
+  );
+
+  const markPaid = async (assignmentId: string) => {
+    setMarking(assignmentId);
+    try {
+      await markPaymentFn({ assignmentIds: [assignmentId] });
+      setAssignments(prev =>
+        prev.map(a => a.id === assignmentId ? { ...a, status: 'paid' } : a)
+      );
+      toast.success('Marked as paid');
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Failed to mark as paid');
     } finally {
       setMarking(null);
     }
@@ -211,6 +292,13 @@ const Payroll: React.FC = () => {
       setMarking(null);
     }
   };
+
+  // ── periodAssignments (for all-pending lookup) ─────────────────────────────
+
+  const periodAssignments = useMemo(
+    () => Object.values(byDriver).flat(),
+    [byDriver],
+  );
 
   const allPendingInPeriod = useMemo(
     () => periodAssignments.filter(a => a.status === 'pending'),
@@ -319,7 +407,7 @@ const Payroll: React.FC = () => {
       {/* Header */}
       <div className="bg-gradient-to-r from-amber-500 to-orange-500 px-8 py-6 flex items-start justify-between print:hidden">
         <div>
-          <h1 className="text-2xl font-bold text-white">Payroll &amp; Revenue</h1>
+          <h1 className="text-2xl font-bold text-white">Payroll & Revenue</h1>
           <p className="text-amber-100 text-sm">Driver pay · business income · period reports</p>
         </div>
         {totalOutstanding > 0 && (
@@ -345,7 +433,7 @@ const Payroll: React.FC = () => {
       {/* Print-only header (only for global print, not stub/print-all print) */}
       <div className={(printStubDriver || printAllStubs) ? 'hidden' : 'hidden print:block px-8 pt-6 pb-2 border-b border-slate-300'}>
         <h1 className="text-xl font-bold text-slate-800">
-          KIDZ Transportation — {tab === 'payroll' ? 'Payroll' : 'Revenue'} Report
+          KIDZ Transportation — {tab === 'payroll' ? 'Payroll' : tab === 'revenue' ? 'Revenue' : 'W-2'} Report
         </h1>
         <p className="text-slate-500 text-sm">{range.label} · Printed {format(new Date(), 'MM/dd/yyyy h:mm a')}</p>
       </div>
@@ -353,13 +441,13 @@ const Payroll: React.FC = () => {
       {/* Controls */}
       <div className="px-8 py-3 bg-white border-b border-slate-200 flex flex-wrap items-center gap-4 print:hidden">
         <div className="flex rounded-xl bg-slate-100 p-1 gap-1">
-          {(['payroll', 'revenue'] as const).map(t => (
+          {(['payroll', 'revenue', 'w2'] as const).map(t => (
             <button key={t} onClick={() => setTab(t)}
               className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-all ${
                 tab === t ? 'bg-white shadow text-slate-800' : 'text-slate-500 hover:text-slate-700'
               }`}
             >
-              {t === 'payroll' ? 'Driver Pay' : 'Revenue'}
+              {t === 'payroll' ? 'Driver Pay' : t === 'revenue' ? 'Revenue' : 'W-2 Stubs'}
             </button>
           ))}
         </div>
@@ -554,39 +642,31 @@ const Payroll: React.FC = () => {
                                 );
                               }
 
-                              const aActual = actualPayForAssignment(a);
+                              const aDays = a.daysWorked || [];
                               return (
                                 <tr key={a.id} className="border-t border-slate-50">
-                                  <td className="pr-4 py-2">
+                                  <td className="pr-4 py-2.5">
                                     <div className="font-medium text-slate-700 truncate max-w-[120px]">
                                       {client?.name || 'Unknown'}
                                     </div>
-                                    <div className="text-slate-400 truncate max-w-[120px]">
-                                      {booking?.pickupAddress || '—'}
-                                    </div>
                                   </td>
                                   {periodDays.map(d => {
-                                    const scheduled = (a.daysWorked || []).includes(DAY_FULL[d.getDay()]);
-                                    const log = getLog(a.bookingId, d);
+                                    const dayName = DAY_FULL[d.getDay()];
+                                    const worked = aDays.includes(dayName);
                                     return (
-                                      <td key={fmt(d)} className="text-center py-2 px-1">
-                                        {!scheduled ? (
-                                          <span className="text-slate-200">—</span>
-                                        ) : log?.ran === true ? (
-                                          <span className="inline-flex items-center justify-center w-6 h-6 bg-emerald-100 text-emerald-600 rounded-full">✓</span>
-                                        ) : log?.ran === false ? (
-                                          <span className="inline-flex items-center justify-center w-6 h-6 bg-red-100 text-red-500 rounded-full">✗</span>
+                                      <td key={fmt(d)} className="text-center py-2.5 px-1">
+                                        {worked ? (
+                                          <CheckCircle size={14} className="mx-auto text-emerald-500" />
                                         ) : (
-                                          <span className="inline-flex items-center justify-center w-6 h-6 bg-amber-50 text-amber-400 rounded-full text-[10px] font-bold">?</span>
+                                          <span className="text-slate-300">—</span>
                                         )}
                                       </td>
                                     );
                                   })}
-                                  <td className="text-right py-2 pl-3">
-                                    <div className="font-bold text-slate-700">${aActual.toFixed(2)}</div>
-                                    <div className="text-slate-400">${(a.weeklyPayout || 0).toFixed(2)} exp</div>
+                                  <td className="text-right py-2.5 pl-3 whitespace-nowrap">
+                                    <div className="font-bold text-slate-700">${(a.weeklyPayout || 0).toFixed(2)}</div>
                                   </td>
-                                  <td className="py-2 pl-3 print:hidden">
+                                  <td className="py-2.5 pl-3 print:hidden">
                                     {a.status === 'paid' ? (
                                       <span className="flex items-center gap-1 text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-medium whitespace-nowrap">
                                         <CheckCircle size={11} /> Paid
@@ -653,6 +733,90 @@ const Payroll: React.FC = () => {
                   </div>
                 );
               })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── W-2 Employee Stubs TAB ────────────────────────────────────────── */}
+      {tab === 'w2' && (
+        <div className="p-8">
+          {/* Actions bar */}
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h2 className="text-lg font-bold text-slate-800">W-2 Employee Pay Stubs</h2>
+              <p className="text-sm text-slate-500 mt-0.5">Manage pay stubs for W-2 employees (Kara Noland)</p>
+            </div>
+            <button
+              onClick={() => setShowW2Form(true)}
+              className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-4 py-2.5 rounded-xl transition-colors shadow-sm"
+            >
+              <FileText size={16} /> Create W-2 Pay Stub
+            </button>
+          </div>
+
+          {/* Stubs table */}
+          {w2Loading ? (
+            <div className="space-y-3">
+              {Array.from({ length: 2 }).map((_, i) => (
+                <div key={i} className="bg-white rounded-xl border border-slate-200 p-5 animate-pulse h-16" />
+              ))}
+            </div>
+          ) : w2Stubs.length === 0 ? (
+            <div className="text-center py-24">
+              <FileText size={48} className="mx-auto text-slate-300 mb-4" />
+              <p className="text-slate-600 font-semibold">No W-2 pay stubs yet</p>
+              <p className="text-slate-400 text-sm mt-1">Create your first W-2 pay stub using the button above.</p>
+            </div>
+          ) : (
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-200">
+                    <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wide">Check Date</th>
+                    <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wide">Pay Period</th>
+                    <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wide">Employee</th>
+                    <th className="text-right px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wide">Gross</th>
+                    <th className="text-right px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wide">Net Pay</th>
+                    <th className="text-center px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wide">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {w2Stubs.map(stub => (
+                    <tr key={stub.id} className="hover:bg-slate-50 transition-colors">
+                      <td className="px-6 py-3.5 font-medium text-slate-700">
+                        {format(new Date(stub.checkDate + 'T00:00:00'), 'MM/dd/yyyy')}
+                      </td>
+                      <td className="px-6 py-3.5 text-slate-600">
+                        {format(new Date(stub.payPeriodStart + 'T00:00:00'), 'MM/dd/yy')} – {format(new Date(stub.payPeriodEnd + 'T00:00:00'), 'MM/dd/yy')}
+                      </td>
+                      <td className="px-6 py-3.5 text-slate-700">{stub.employeeName}</td>
+                      <td className="px-6 py-3.5 text-right text-slate-700 font-medium">{fmtDollar(stub.grossSalary)}</td>
+                      <td className="px-6 py-3.5 text-right text-emerald-600 font-semibold">{fmtDollar(stub.netPay)}</td>
+                      <td className="px-6 py-3.5">
+                        <div className="flex items-center justify-center gap-2">
+                          <button
+                            onClick={() => handleDownloadW2PDF(stub)}
+                            className="flex items-center gap-1 text-xs bg-indigo-100 hover:bg-indigo-200 text-indigo-700 px-2.5 py-1.5 rounded-lg font-semibold transition-colors"
+                          >
+                            <Printer size={12} /> Print / PDF
+                          </button>
+                          <button
+                            onClick={() => handleDeleteW2(stub.id)}
+                            disabled={deletingW2 === stub.id}
+                            className="flex items-center gap-1 text-xs bg-red-50 hover:bg-red-100 text-red-600 px-2.5 py-1.5 rounded-lg font-semibold transition-colors disabled:opacity-60"
+                          >
+                            {deletingW2 === stub.id
+                              ? <span className="w-3 h-3 border-2 border-red-500 border-t-transparent rounded-full animate-spin" />
+                              : <Trash2 size={12} />}
+                            Delete
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
@@ -958,9 +1122,17 @@ const Payroll: React.FC = () => {
           )}
         </div>
       )}
+
+      {/* ── W-2 FORM MODAL ────────────────────────────────────────────────── */}
+      {showW2Form && (
+        <W2PayStubForm
+          open={showW2Form}
+          onSaved={handleW2Saved}
+          onClose={() => setShowW2Form(false)}
+        />
+      )}
     </div>
   );
 };
 
 export default Payroll;
-

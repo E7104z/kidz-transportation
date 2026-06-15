@@ -522,3 +522,49 @@ export interface DriverPayout {
   createdAt: Timestamp;
   actorUid: string;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// W-2 Employee Pay Stubs
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface W2PayStub {
+  id: string;
+  employeeId: string;           // 'kara-noland' for now — hardcoded
+  employeeName: string;
+  employeeAddress: string;
+  employeeCity: string;
+  employeeState: string;
+  employeeZip: string;
+  companyName: string;
+  companyAddress: string;
+  companyCity: string;
+  companyState: string;
+  companyZip: string;
+  companyPhone: string;
+  payPeriodStart: string;       // 'YYYY-MM-DD'
+  payPeriodEnd: string;         // 'YYYY-MM-DD'
+  checkDate: string;            // 'YYYY-MM-DD'
+  checkNumber: string;
+  // Earnings
+  grossSalary: number;
+  ytdGrossSalary: number;
+  // Withholdings (all manually entered)
+  socialSecurity: number;
+  medicare: number;
+  federalIncomeTax: number;
+  moIncomeTax: number;
+  moStlouIncomeTax: number;     // St. Louis city earnings tax
+  // YTD Withholdings
+  ytdSocialSecurity: number;
+  ytdMedicare: number;
+  ytdFederalIncomeTax: number;
+  ytdMoIncomeTax: number;
+  ytdMoStlouIncomeTax: number;
+  // Computed (store for reference, always derivable)
+  totalWithholdings: number;
+  netPay: number;
+  ytdTotalWithholdings: number;
+  ytdNetPay: number;
+  createdAt: string;
+  createdBy: string;
+}
