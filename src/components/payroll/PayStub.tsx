@@ -169,9 +169,10 @@ const PayStub: React.FC<PayStubProps> = ({
 
   return (
     <>
-      {/* Single-print: use visibility trick so sidebar/layout disappears.
-          Batch print: parent (Payroll.tsx) handles visibility via print:hidden. */}
-      {printMode === 'single' && (
+      {/* Inject print CSS only when rendering for actual print (not preview).
+          Preview mode skips all <style> injection since the parent modal
+          handles rendering; the hidden print-only copy handles its own CSS. */}
+      {!preview && printMode === 'single' && (
         <style>{`
           @media print {
             @page { size: letter portrait; margin: 0.5in; }
@@ -181,7 +182,7 @@ const PayStub: React.FC<PayStubProps> = ({
           }
         `}</style>
       )}
-      {printMode === 'batch' && (
+      {!preview && printMode === 'batch' && (
         <style>{`
           @media print {
             @page { size: letter portrait; margin: 0.5in; }
@@ -189,7 +190,7 @@ const PayStub: React.FC<PayStubProps> = ({
         `}</style>
       )}
 
-      <div className="paystub-print-root" style={{ ...S.root, ...(preview ? { transform: 'scale(1.05)', transformOrigin: 'top center' } : {}) }}>
+      <div className="paystub-print-root" style={S.root}>
 
         {/* ══ CHECK ══════════════════════════════════════════════════════════ */}
         <div style={S.check}>
