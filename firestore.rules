@@ -108,6 +108,10 @@ service cloud.firestore {
       allow read, write: if isAdmin();
     }
 
+    match /w2PayStubs/{id} {
+      allow read, write: if isAdmin();
+    }
+
     // ── audit log ────────────────────────────────────────────────────────────
     // Written exclusively by Cloud Functions (server-side) via the Admin SDK,
     // which bypasses Security Rules entirely — no client write needed.
