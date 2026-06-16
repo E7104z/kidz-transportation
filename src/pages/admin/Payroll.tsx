@@ -255,7 +255,7 @@ const Payroll: React.FC = () => {
   const markPaymentFn = useCallback(
     async (args: { assignmentIds: string[] }) => {
       const markFn = httpsCallable<{ assignmentIds: string[] }, { success: boolean }>(
-        getFunctions(), 'markAssignmentPayment'
+        getFunctions(), 'markPayment'
       );
       return markFn(args);
     },
