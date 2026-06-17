@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kidz-v2';
+const CACHE_NAME = 'kidz-v3';
 const PRECACHE = [
   '/manifest.json',
   '/icons/icon-192.png',
