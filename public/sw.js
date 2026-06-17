@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kidz-v3';
+const CACHE_NAME = 'kidz-v4';
 const PRECACHE = [
   '/manifest.json',
   '/icons/icon-192.png',
@@ -10,16 +10,18 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE))
   );
+  // Force the waiting service worker to become active immediately
   self.skipWaiting();
 });
 
-// Activate — clean old caches
+// Activate — clean ALL old caches (including the previous version of our own cache)
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
+      Promise.all(keys.map((k) => caches.delete(k)))
     )
   );
+  // Take control of all clients immediately so they use the new sw
   self.clients.claim();
 });
 
