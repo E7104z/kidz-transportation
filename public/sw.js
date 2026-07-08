@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kidz-v4';
+const CACHE_NAME = 'kidz-v5';
 const PRECACHE = [
   '/manifest.json',
   '/icons/icon-192.png',
@@ -19,9 +19,8 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
       Promise.all(keys.map((k) => caches.delete(k)))
-    )
+    ).then(() => self.clients.claim())
   );
-  // Take control of all clients immediately so they use the n.clients.claim();
 });
 
 // Fetch — network-first for navigation & JS/CSS, cache-first for icons/images
