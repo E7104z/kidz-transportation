@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import {
-  collection, getDocs,
+  collection, getDocs, onSnapshot,
 } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { db } from '../../services/firebase';
@@ -20,7 +20,7 @@ import {
 } from 'date-fns';
 import {
   DollarSign, CheckCircle, Check, ChevronLeft, ChevronRight, Printer,
-  TrendingUp, TrendingDown, BarChart2, Zap, X, FileText, Trash2,
+  TrendingUp, TrendingDown, BarChart2, Zap, X, FileText, Trash2, AlertTriangle,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
@@ -159,25 +159,45 @@ const Payroll: React.FC = () => {
 
   // ── (end W-2 state) ───────────────────────────────────────────────────────
 
-  // One-time fetch — payroll data is not live; re-fetch after mark-paid actions
-  const loadData = useCallback(async () => {
-    setLoading(true);
-    const [a, d, b, c, l] = await Promise.all([
-      getDocs(collection(db, 'routeAssignments')),
-      getDocs(collection(db, 'drivers')),
-      getDocs(collection(db, 'bookings')),
-      getDocs(collection(db, 'clients')),
-      getDocs(collection(db, 'routeLogs')),
-    ]);
-    setAssignments(a.docs.map(doc => ({ id: doc.id, ...doc.data() }) as RouteAssignment));
-    setDrivers(d.docs.map(doc     => ({ id: doc.id, ...doc.data() }) as Driver));
-    setBookings(b.docs.map(doc    => ({ id: doc.id, ...doc.data() }) as Booking));
-    setClients(c.docs.map(doc     => ({ id: doc.id, ...doc.data() }) as Client));
-    setRouteLogs(l.docs.map(doc   => ({ id: doc.id, ...doc.data() }) as RouteLog));
-    setLoading(false);
+  // Real-time listeners for all core collections — new clients/bookings/assignments
+  // appear automatically without needing a manual refresh.
+  const loadRouteLogs = useCallback(async () => {
+    const snap = await getDocs(collection(db, 'routeLogs'));
+    setRouteLogs(snap.docs.map(doc => ({ id: doc.id, ...doc.data() }) as RouteLog));
   }, []);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  // Combined refresh for the Refresh button — only routeLogs need a manual reload
+  // since the other collections are kept live via onSnapshot.
+  const loadData = useCallback(() => { loadRouteLogs(); }, [loadRouteLogs]);
+
+  useEffect(() => {
+    let resolved = 0;
+    const tryDone = () => { resolved++; if (resolved >= 4) setLoading(false); };
+
+    const unsubs = [
+      onSnapshot(collection(db, 'routeAssignments'), snap => {
+        setAssignments(snap.docs.map(d => ({ id: d.id, ...d.data() }) as RouteAssignment));
+        tryDone();
+      }),
+      onSnapshot(collection(db, 'drivers'), snap => {
+        setDrivers(snap.docs.map(d => ({ id: d.id, ...d.data() }) as Driver));
+        tryDone();
+      }),
+      onSnapshot(collection(db, 'bookings'), snap => {
+        setBookings(snap.docs.map(d => ({ id: d.id, ...d.data() }) as Booking));
+        tryDone();
+      }),
+      onSnapshot(collection(db, 'clients'), snap => {
+        setClients(snap.docs.map(d => ({ id: d.id, ...d.data() }) as Client));
+        tryDone();
+      }),
+    ];
+
+    // Route logs are large — load once on mount, refresh manually via button
+    loadRouteLogs();
+
+    return () => unsubs.forEach(u => u());
+  }, [loadRouteLogs]);
 
   // ── derived state ──────────────────────────────────────────────────────────
 
@@ -229,6 +249,46 @@ const Payroll: React.FC = () => {
     const ids = Object.values(byDriver).flat().filter(a => a.status === 'pending');
     return ids.reduce((s, a) => s + (a.weeklyPayout || 0), 0);
   }, [byDriver]);
+
+  // ── Unassigned / carry-over active routes ─────────────────────────────────
+
+  // bookingIds that have at least one assignment (any week, any driver)
+  const everAssignedBookingIds = useMemo(
+    () => new Set(assignments.map(a => a.bookingId)),
+    [assignments],
+  );
+
+  // bookingIds that have an assignment specifically in the current period
+  const inPeriodBookingIds = useMemo(
+    () => new Set(
+      assignments
+        .filter(a => isWithinInterval(toDate(a.weekStart), { start: range.start, end: range.end }))
+        .map(a => a.bookingId)
+    ),
+    [assignments, range],
+  );
+
+  // Active bookings that have NEVER been assigned to any driver
+  const neverAssignedRoutes = useMemo(
+    () => bookings.filter(b => b.status === 'active' && !everAssignedBookingIds.has(b.id)),
+    [bookings, everAssignedBookingIds],
+  );
+
+  // Active bookings that have been assigned before but have NO assignment in the
+  // current period (recurring routes whose assignment wasn't renewed this period)
+  const carryOverRoutes = useMemo(() => {
+    const eligible = bookings.filter(
+      b => b.status === 'active' && everAssignedBookingIds.has(b.id) && !inPeriodBookingIds.has(b.id)
+    );
+    return eligible.map(b => {
+      // Find the most recent assignment for this booking
+      const latest = assignments
+        .filter(a => a.bookingId === b.id)
+        .sort((x, y) => toDate(y.weekStart).getTime() - toDate(x.weekStart).getTime())[0];
+      const driver = drivers.find(d => d.id === latest?.driverId) || null;
+      return { booking: b, assignment: latest, driver };
+    });
+  }, [bookings, assignments, drivers, everAssignedBookingIds, inPeriodBookingIds]);
 
   // Actual pay factoring in multi-driver split (routeAssignments with routeCompletedBy)
   const actualPayForAssignment = useCallback((a: RouteAssignment): number => {
@@ -790,10 +850,84 @@ const Payroll: React.FC = () => {
               })}
             </div>
           )}
+
+          {/* ── Unassigned & carry-over active routes ──────────────────────── */}
+          {!loading && (neverAssignedRoutes.length > 0 || carryOverRoutes.length > 0) && (
+            <div className="mt-6 space-y-3">
+              <div className="flex items-center gap-2 mb-1">
+                <AlertTriangle size={15} className="text-amber-500" />
+                <h3 className="text-sm font-bold text-slate-700">Active Routes Without This Period's Assignment</h3>
+              </div>
+
+              {/* Never-assigned routes */}
+              {neverAssignedRoutes.map(b => {
+                const client = clients.find(c => c.id === b.clientId);
+                const daysCount = b.daysOfWeek?.length || 5;
+                const dr = b.weeklyRate ? b.weeklyRate / daysCount : (b.dailyRate || 0);
+                const periodExpected = periodDays.filter(d => (b.daysOfWeek || []).includes(DAY_FULL[d.getDay()])).length * dr;
+                return (
+                  <div key={b.id} className="bg-white border border-amber-200 rounded-2xl px-5 py-4 flex items-center justify-between gap-4 shadow-sm">
+                    <div className="flex items-center gap-3">
+                      <div className="w-9 h-9 bg-amber-100 rounded-full flex items-center justify-center text-amber-600 font-bold text-sm flex-shrink-0">
+                        {(client?.name || '?').charAt(0).toUpperCase()}
+                      </div>
+                      <div>
+                        <div className="font-semibold text-slate-800">{client?.name || 'Unknown Client'}</div>
+                        <div className="text-xs text-slate-500 mt-0.5">
+                          {b.daysOfWeek?.join(', ') || 'No days set'} · ${b.weeklyRate?.toFixed(2) || '0.00'}/wk
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-4 flex-shrink-0">
+                      <div className="text-right">
+                        <div className="text-xs text-slate-400 uppercase tracking-wide">Period Expected</div>
+                        <div className="text-sm font-bold text-slate-700">${periodExpected.toFixed(2)}</div>
+                      </div>
+                      <span className="text-xs bg-red-100 text-red-700 px-2.5 py-1 rounded-full font-semibold whitespace-nowrap">
+                        No Driver Assigned
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {/* Carry-over routes (assigned before, not renewed this period) */}
+              {carryOverRoutes.map(({ booking: b, assignment: a, driver }) => {
+                const client = clients.find(c => c.id === b.clientId);
+                const daysCount = b.daysOfWeek?.length || 5;
+                const dr = b.weeklyRate ? b.weeklyRate / daysCount : (b.dailyRate || 0);
+                const periodExpected = periodDays.filter(d => (b.daysOfWeek || []).includes(DAY_FULL[d.getDay()])).length * dr;
+                return (
+                  <div key={b.id} className="bg-white border border-slate-200 rounded-2xl px-5 py-4 flex items-center justify-between gap-4 shadow-sm opacity-80">
+                    <div className="flex items-center gap-3">
+                      <div className="w-9 h-9 bg-slate-100 rounded-full flex items-center justify-center text-slate-500 font-bold text-sm flex-shrink-0">
+                        {(client?.name || '?').charAt(0).toUpperCase()}
+                      </div>
+                      <div>
+                        <div className="font-semibold text-slate-800">{client?.name || 'Unknown Client'}</div>
+                        <div className="text-xs text-slate-500 mt-0.5">
+                          {b.daysOfWeek?.join(', ') || 'No days set'} · ${b.weeklyRate?.toFixed(2) || '0.00'}/wk
+                          {driver && <span className="ml-2 text-indigo-600">· {driver.name}</span>}
+                          {a && <span className="ml-1 text-slate-400">(last: {format(toDate(a.weekStart), 'MMM d')})</span>}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-4 flex-shrink-0">
+                      <div className="text-right">
+                        <div className="text-xs text-slate-400 uppercase tracking-wide">Period Expected</div>
+                        <div className="text-sm font-bold text-slate-700">${periodExpected.toFixed(2)}</div>
+                      </div>
+                      <span className="text-xs bg-amber-100 text-amber-700 px-2.5 py-1 rounded-full font-semibold whitespace-nowrap">
+                        No Period Assignment
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
-
-      {/* ── W-2 Employee Stubs TAB ────────────────────────────────────────── */}
       {tab === 'w2' && (
         <div className="p-8">
           {/* Actions bar */}
