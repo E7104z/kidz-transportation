@@ -14,7 +14,7 @@ import {
   deleteW2PayStub,
 } from '../../services/w2PayStubService';
 import {
-  format, addWeeks, addMonths, addYears,
+  format, addDays, addWeeks, addMonths, addYears,
   startOfWeek, endOfWeek, startOfMonth, endOfMonth, startOfYear, endOfYear,
   eachDayOfInterval, isWithinInterval,
 } from 'date-fns';
@@ -250,6 +250,18 @@ const Payroll: React.FC = () => {
     return Math.min(payout, dailyRate * logsThisWeek.length);
   }, [routeLogs, bookings]);
 
+  // Resolve a driver's assignments for the PayStub: override each assignment's
+  // weeklyPayout with the actual pay (prorated from route logs) so the stub's
+  // gross pay reflects real runs instead of the stale stored full-week amount.
+  const resolvedAssignmentsFor = useCallback(
+    (driverId: string): RouteAssignment[] =>
+      (byDriver[driverId] || []).map(a => ({
+        ...a,
+        weeklyPayout: actualPayForAssignment(a),
+      })),
+    [byDriver, actualPayForAssignment],
+  );
+
   // ── actions ────────────────────────────────────────────────────────────────
 
   const markPaymentFn = useCallback(
@@ -366,6 +378,7 @@ const Payroll: React.FC = () => {
   const revenueStats = useMemo(() => {
     const interval = { start: range.start, end: range.end };
     let expected = 0;
+    let confirmedRuns = 0;
     const byClient: Record<string, { name: string; expected: number; actual: number }> = {};
 
     bookings
@@ -382,6 +395,9 @@ const Payroll: React.FC = () => {
       });
 
     let actual = 0;
+
+    // Primary source: route logs confirmed as ran
+    const countedKeys = new Set<string>(); // "bookingId:YYYY-MM-DD"
     routeLogs
       .filter(l => l.ran && isWithinInterval(new Date(l.date + 'T00:00:00'), interval))
       .forEach(l => {
@@ -390,11 +406,44 @@ const Payroll: React.FC = () => {
         const daysCount = booking.daysOfWeek?.length || 5;
         const dr        = booking.weeklyRate ? booking.weeklyRate / daysCount : (booking.dailyRate || 0);
         actual += dr;
+        confirmedRuns += 1;
+        countedKeys.add(`${l.bookingId}:${l.date}`);
         if (byClient[booking.clientId]) byClient[booking.clientId].actual += dr;
       });
 
-    return { expected, actual, byClient: Object.values(byClient) };
-  }, [bookings, clients, routeLogs, periodDays, range]);
+    // Secondary source: paid assignments without matching route logs.
+    // Handles the case where admin marks payment manually without driver route log entries.
+    assignments
+      .filter(a => a.status === 'paid' && isWithinInterval(toDate(a.weekStart), interval))
+      .forEach(a => {
+        const booking = bookings.find(b => b.id === a.bookingId);
+        if (!booking) return;
+        const daysCount = booking.daysOfWeek?.length || 5;
+        const dr        = booking.weeklyRate ? booking.weeklyRate / daysCount : (booking.dailyRate || 0);
+        const workedDays = a.daysWorked?.length ? a.daysWorked : (booking.daysOfWeek || []);
+        const weekMonday = startOfWeek(toDate(a.weekStart), { weekStartsOn: 1 });
+
+        workedDays.forEach(dayName => {
+          // Calculate the date for this day within the assignment's Mon-based week
+          const dayIndex = (DAY_FULL as readonly string[]).indexOf(dayName);
+          if (dayIndex < 0) return;
+          const offset  = (dayIndex - 1 + 7) % 7; // days since Monday
+          const dayDate = addDays(weekMonday, offset);
+          const dateStr = fmt(dayDate);
+          const key     = `${a.bookingId}:${dateStr}`;
+
+          // Only count if not already covered by a route log
+          if (!countedKeys.has(key)) {
+            actual += dr;
+            confirmedRuns += 1;
+            countedKeys.add(key);
+            if (byClient[booking.clientId]) byClient[booking.clientId].actual += dr;
+          }
+        });
+      });
+
+    return { expected, actual, confirmedRuns, byClient: Object.values(byClient) };
+  }, [bookings, clients, routeLogs, assignments, periodDays, range]);
 
   const variance = revenueStats.actual - revenueStats.expected;
 
@@ -452,32 +501,36 @@ const Payroll: React.FC = () => {
           ))}
         </div>
 
-        <div className="flex items-center gap-1 bg-slate-100 rounded-xl p-1">
-          {(['week', 'month', 'year'] as const).map(m => (
-            <button key={m} onClick={() => handleModeChange(m)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold capitalize transition-all ${
-                mode === m ? 'bg-white shadow text-slate-800' : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              {m}
-            </button>
-          ))}
-        </div>
+        {tab !== 'w2' && (
+          <div className="flex items-center gap-1 bg-slate-100 rounded-xl p-1">
+            {(['week', 'month', 'year'] as const).map(m => (
+              <button key={m} onClick={() => handleModeChange(m)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold capitalize transition-all ${
+                  mode === m ? 'bg-white shadow text-slate-800' : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
+        )}
 
-        <div className="flex items-center gap-1">
-          <button onClick={() => setOffset(o => o - 1)} className="p-1.5 hover:bg-slate-100 rounded-lg transition-colors">
-            <ChevronLeft size={17} />
-          </button>
-          <span className="text-sm font-semibold text-slate-700 min-w-[130px] text-center">{range.label}</span>
-          <button onClick={() => setOffset(o => o + 1)} className="p-1.5 hover:bg-slate-100 rounded-lg transition-colors">
-            <ChevronRight size={17} />
-          </button>
-          {offset !== 0 && (
-            <button onClick={() => setOffset(0)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium ml-1">
-              Current
+        {tab !== 'w2' && (
+          <div className="flex items-center gap-1">
+            <button onClick={() => setOffset(o => o - 1)} className="p-1.5 hover:bg-slate-100 rounded-lg transition-colors">
+              <ChevronLeft size={17} />
             </button>
-          )}
-        </div>
+            <span className="text-sm font-semibold text-slate-700 min-w-[130px] text-center">{range.label}</span>
+            <button onClick={() => setOffset(o => o + 1)} className="p-1.5 hover:bg-slate-100 rounded-lg transition-colors">
+              <ChevronRight size={17} />
+            </button>
+            {offset !== 0 && (
+              <button onClick={() => setOffset(0)} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium ml-1">
+                Current
+              </button>
+            )}
+          </div>
+        )}
 
         <button
           onClick={() => loadData()}
@@ -485,12 +538,14 @@ const Payroll: React.FC = () => {
         >
           ↺ Refresh
         </button>
-        <button
-          onClick={() => { setPrintAllStubs(true); setTimeout(() => { window.print(); setPrintAllStubs(false); }, 100); }}
-          className="ml-auto flex items-center gap-1.5 text-sm font-semibold bg-amber-500 hover:bg-amber-600 text-white px-4 py-1.5 rounded-lg transition-colors shadow-sm"
-        >
-          <Printer size={15} /> Print All Pay Stubs
-        </button>
+        {tab !== 'w2' && (
+          <button
+            onClick={() => { setPrintAllStubs(true); setTimeout(() => { window.print(); setPrintAllStubs(false); }, 100); }}
+            className="ml-auto flex items-center gap-1.5 text-sm font-semibold bg-amber-500 hover:bg-amber-600 text-white px-4 py-1.5 rounded-lg transition-colors shadow-sm"
+          >
+            <Printer size={15} /> Print All Pay Stubs
+          </button>
+        )}
       </div>
 
       {/* ── PAYROLL TAB ──────────────────────────────────────────────────── */}
@@ -912,7 +967,7 @@ const Payroll: React.FC = () => {
             <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4">
               <PayStub
                 driver={printStubDriver}
-                assignments={byDriver[printStubDriver.id] || []}
+                assignments={resolvedAssignmentsFor(printStubDriver.id)}
                 bookings={bookings}
                 clients={clients}
                 periodLabel={range.label}
@@ -941,7 +996,7 @@ const Payroll: React.FC = () => {
         <div className="hidden print:block p-8">
           <PayStub
             driver={printStubDriver}
-            assignments={byDriver[printStubDriver.id] || []}
+            assignments={resolvedAssignmentsFor(printStubDriver.id)}
             bookings={bookings}
             clients={clients}
             periodLabel={range.label}
@@ -959,7 +1014,7 @@ const Payroll: React.FC = () => {
             <div key={driver.id} className={idx > 0 ? 'print:break-before-page' : ''}>
               <PayStub
                 driver={driver}
-                assignments={byDriver[driver.id] || []}
+                assignments={resolvedAssignmentsFor(driver.id)}
                 bookings={bookings}
                 clients={clients}
                 periodLabel={range.label}
@@ -1093,7 +1148,7 @@ const Payroll: React.FC = () => {
                   { label: 'Active bookings', value: bookings.filter(b => b.status === 'active').length, color: 'text-slate-800' },
                   {
                     label: 'Confirmed runs (ran)',
-                    value: routeLogs.filter(l => l.ran && isWithinInterval(new Date(l.date + 'T00:00:00'), { start: range.start, end: range.end })).length,
+                    value: revenueStats.confirmedRuns,
                     color: 'text-emerald-600',
                   },
                   {

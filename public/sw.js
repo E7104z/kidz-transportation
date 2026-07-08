@@ -21,8 +21,7 @@ self.addEventListener('activate', (event) => {
       Promise.all(keys.map((k) => caches.delete(k)))
     )
   );
-  // Take control of all clients immediately so they use the new sw
-  self.clients.claim();
+  // Take control of all clients immediately so they use the n.clients.claim();
 });
 
 // Fetch — network-first for navigation & JS/CSS, cache-first for icons/images

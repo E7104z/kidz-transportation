@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat .env.local)",
+      "Bash(ls .env*)",
+      "Bash(firebase login:ci)",
+      "Bash(git commit -m ' *)",
+      "Bash(node -e \"const p = require\\('./package.json'\\); console.log\\(p.dependencies['firebase-functions']\\)\")",
+      "Bash(node -e \"const p = require\\('C:/Users/Quantum Lab/Desktop/Kidz Transportation/functions/node_modules/firebase-functions/package.json'\\); console.log\\(p.version\\)\")",
+      "Bash(node -e ' *)"
+    ]
+  }
+}
