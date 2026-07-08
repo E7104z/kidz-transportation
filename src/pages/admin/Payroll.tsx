@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import {
-  collection, getDocs, onSnapshot,
+  collection, getDocs, onSnapshot, addDoc, serverTimestamp,
 } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { db } from '../../services/firebase';
@@ -85,6 +85,7 @@ const Payroll: React.FC = () => {
   const [routeLogs,   setRouteLogs]   = useState<RouteLog[]>([]);
   const [loading,     setLoading]     = useState(true);
   const [marking,     setMarking]     = useState<string | null>(null);
+  const [renewing,    setRenewing]    = useState<string | null>(null); // bookingId being renewed
 
   const [printStubDriver, setPrintStubDriver] = useState<Driver | null>(null);
   const [printAllStubs, setPrintAllStubs] = useState(false);
@@ -323,6 +324,28 @@ const Payroll: React.FC = () => {
   );
 
   // ── actions ────────────────────────────────────────────────────────────────
+
+  // Create a new period assignment for a carry-over route (same driver, current period)
+  const renewAssignment = useCallback(async (booking: Booking, lastDriver: Driver) => {
+    setRenewing(booking.id);
+    try {
+      await addDoc(collection(db, 'routeAssignments'), {
+        driverId: lastDriver.id,
+        bookingId: booking.id,
+        weekStart: range.start,
+        daysWorked: booking.daysOfWeek || [],
+        weeklyPayout: (booking.weeklyRate || 0) * ((lastDriver.payoutSplit ?? 70) / 100),
+        status: 'pending',
+        paidDate: null,
+        createdAt: serverTimestamp(),
+      });
+      toast.success(`Assignment renewed for ${lastDriver.name}`);
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Failed to renew assignment');
+    } finally {
+      setRenewing(null);
+    }
+  }, [range.start]);
 
   const markPaymentFn = useCallback(
     async (args: { assignmentIds: string[] }) => {
@@ -897,8 +920,9 @@ const Payroll: React.FC = () => {
                 const daysCount = b.daysOfWeek?.length || 5;
                 const dr = b.weeklyRate ? b.weeklyRate / daysCount : (b.dailyRate || 0);
                 const periodExpected = periodDays.filter(d => (b.daysOfWeek || []).includes(DAY_FULL[d.getDay()])).length * dr;
+                const isRenewing = renewing === b.id;
                 return (
-                  <div key={b.id} className="bg-white border border-slate-200 rounded-2xl px-5 py-4 flex items-center justify-between gap-4 shadow-sm opacity-80">
+                  <div key={b.id} className="bg-white border border-slate-200 rounded-2xl px-5 py-4 flex items-center justify-between gap-4 shadow-sm">
                     <div className="flex items-center gap-3">
                       <div className="w-9 h-9 bg-slate-100 rounded-full flex items-center justify-center text-slate-500 font-bold text-sm flex-shrink-0">
                         {(client?.name || '?').charAt(0).toUpperCase()}
@@ -912,14 +936,27 @@ const Payroll: React.FC = () => {
                         </div>
                       </div>
                     </div>
-                    <div className="flex items-center gap-4 flex-shrink-0">
+                    <div className="flex items-center gap-3 flex-shrink-0">
                       <div className="text-right">
                         <div className="text-xs text-slate-400 uppercase tracking-wide">Period Expected</div>
                         <div className="text-sm font-bold text-slate-700">${periodExpected.toFixed(2)}</div>
                       </div>
-                      <span className="text-xs bg-amber-100 text-amber-700 px-2.5 py-1 rounded-full font-semibold whitespace-nowrap">
-                        No Period Assignment
-                      </span>
+                      {driver ? (
+                        <button
+                          onClick={() => renewAssignment(b, driver)}
+                          disabled={isRenewing}
+                          className="flex items-center gap-1.5 text-xs bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg font-semibold transition-colors disabled:opacity-60 whitespace-nowrap"
+                        >
+                          {isRenewing
+                            ? <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                            : <Check size={12} />}
+                          {isRenewing ? 'Renewing…' : `Renew — ${driver.name}`}
+                        </button>
+                      ) : (
+                        <span className="text-xs bg-amber-100 text-amber-700 px-2.5 py-1 rounded-full font-semibold whitespace-nowrap">
+                          No Period Assignment
+                        </span>
+                      )}
                     </div>
                   </div>
                 );
