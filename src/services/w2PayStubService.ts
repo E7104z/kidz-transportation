@@ -121,13 +121,13 @@ export async function createW2PayStub(
   createdBy: string
 ): Promise<string> {
   // Fetch all existing stubs for this employee so we can compute the correct YTD
+  // (no orderBy here — avoids requiring a composite Firestore index; we sort in JS)
   const existingSnap = await getDocs(
-    query(collection(db, COLLECTION),
-      where('employeeId', '==', data.employeeId),
-      orderBy('checkDate', 'asc')
-    )
+    query(collection(db, COLLECTION), where('employeeId', '==', data.employeeId))
   );
-  const existingRaw = existingSnap.docs.map(d => ({ id: d.id, ...d.data() } as W2PayStub));
+  const existingRaw = existingSnap.docs
+    .map(d => ({ id: d.id, ...d.data() } as W2PayStub))
+    .sort((a, b) => a.checkDate.localeCompare(b.checkDate));
 
   // Build the stub-to-save as a pseudo-stub so applyDynamicYTD can compute its YTD
   const tempId = '__new__';
@@ -277,15 +277,14 @@ export async function updateW2PayStub(
   data: CreateW2PayStubInput,
 ): Promise<void> {
   // Fetch all stubs for this employee EXCEPT the one being updated
+  // (no orderBy — avoids composite index requirement; sorted in JS below)
   const existingSnap = await getDocs(
-    query(collection(db, COLLECTION),
-      where('employeeId', '==', data.employeeId),
-      orderBy('checkDate', 'asc')
-    )
+    query(collection(db, COLLECTION), where('employeeId', '==', data.employeeId))
   );
   const existingRaw = existingSnap.docs
     .filter(d => d.id !== id)
-    .map(d => ({ id: d.id, ...d.data() } as W2PayStub));
+    .map(d => ({ id: d.id, ...d.data() } as W2PayStub))
+    .sort((a, b) => a.checkDate.localeCompare(b.checkDate));
 
   const tempId = '__updated__';
   const pseudoStub: W2PayStub = {
