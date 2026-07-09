@@ -99,10 +99,14 @@ const Payroll: React.FC = () => {
 
   // ── W-2 state ─────────────────────────────────────────────────────────────
 
-  const [showW2Form, setShowW2Form] = useState(false);
-  const [w2Stubs, setW2Stubs] = useState<W2PayStub[]>([]);
-  const [w2Loading, setW2Loading] = useState(false);
-  const [deletingW2, setDeletingW2] = useState<string | null>(null);
+  const [showW2Form,   setShowW2Form]   = useState(false);
+  const [w2Stubs,      setW2Stubs]      = useState<W2PayStub[]>([]);
+  const [w2Loading,    setW2Loading]    = useState(false);
+  const [deletingW2,   setDeletingW2]   = useState<string | null>(null);
+  const [editStub,     setEditStub]     = useState<W2PayStub | null>(null);
+  const [previewStub,  setPreviewStub]  = useState<W2PayStub | null>(null);
+  const [previewUrl,   setPreviewUrl]   = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   const loadW2Stubs = useCallback(async () => {
     setW2Loading(true);
@@ -157,6 +161,27 @@ const Payroll: React.FC = () => {
       toast.error(err?.message ?? 'Failed to generate PDF');
     }
   }, []);
+
+  const handlePreviewW2 = useCallback(async (stub: W2PayStub) => {
+    setPreviewStub(stub);
+    setPreviewLoading(true);
+    setPreviewUrl(null);
+    try {
+      const blob = await pdf(<W2PayStubPDF stub={stub} />).toBlob();
+      setPreviewUrl(URL.createObjectURL(blob));
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Failed to generate preview');
+      setPreviewStub(null);
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, []);
+
+  const closePreview = useCallback(() => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewUrl(null);
+    setPreviewStub(null);
+  }, [previewUrl]);
 
   // ── (end W-2 state) ───────────────────────────────────────────────────────
 
@@ -974,7 +999,7 @@ const Payroll: React.FC = () => {
               <p className="text-sm text-slate-500 mt-0.5">Manage pay stubs for W-2 employees (Kara Noland)</p>
             </div>
             <button
-              onClick={() => setShowW2Form(true)}
+              onClick={() => { setEditStub(null); setShowW2Form(true); }}
               className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-4 py-2.5 rounded-xl transition-colors shadow-sm"
             >
               <FileText size={16} /> Create W-2 Pay Stub
@@ -1022,10 +1047,16 @@ const Payroll: React.FC = () => {
                       <td className="px-6 py-3.5">
                         <div className="flex items-center justify-center gap-2">
                           <button
-                            onClick={() => handleDownloadW2PDF(stub)}
+                            onClick={() => handlePreviewW2(stub)}
                             className="flex items-center gap-1 text-xs bg-indigo-100 hover:bg-indigo-200 text-indigo-700 px-2.5 py-1.5 rounded-lg font-semibold transition-colors"
                           >
-                            <Printer size={12} /> Print / PDF
+                            <Printer size={12} /> Preview
+                          </button>
+                          <button
+                            onClick={() => { setEditStub(stub); setShowW2Form(true); }}
+                            className="flex items-center gap-1 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-2.5 py-1.5 rounded-lg font-semibold transition-colors"
+                          >
+                            <FileText size={12} /> Edit
                           </button>
                           <button
                             onClick={() => handleDeleteW2(stub.id)}
@@ -1354,9 +1385,52 @@ const Payroll: React.FC = () => {
         <W2PayStubForm
           open={showW2Form}
           onSaved={handleW2Saved}
-          onClose={() => setShowW2Form(false)}
+          onClose={() => { setShowW2Form(false); setEditStub(null); }}
           existingStubs={w2Stubs}
+          stub={editStub ?? undefined}
         />
+      )}
+
+      {/* ── W-2 PREVIEW MODAL ─────────────────────────────────────────────── */}
+      {previewStub && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl flex flex-col" style={{ height: '90vh' }}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 flex-shrink-0">
+              <div>
+                <h2 className="text-lg font-bold text-slate-800">Pay Stub Preview</h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {previewStub.employeeName} · Check date {format(new Date(previewStub.checkDate + 'T00:00:00'), 'MM/dd/yyyy')}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handleDownloadW2PDF(previewStub)}
+                  className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold px-3 py-1.5 rounded-lg transition-colors"
+                >
+                  <Printer size={14} /> Download PDF
+                </button>
+                <button onClick={closePreview} className="p-1.5 hover:bg-slate-100 rounded-lg">
+                  <X size={18} className="text-slate-500" />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 min-h-0 bg-slate-100 rounded-b-2xl overflow-hidden">
+              {previewLoading ? (
+                <div className="flex items-center justify-center h-full gap-3 text-slate-500">
+                  <span className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                  Generating preview…
+                </div>
+              ) : previewUrl ? (
+                <iframe
+                  id="w2-preview-frame"
+                  src={previewUrl}
+                  className="w-full h-full rounded-b-2xl border-0"
+                  title="W-2 Pay Stub Preview"
+                />
+              ) : null}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -10,6 +10,7 @@ import {
   getDoc,
   doc,
   deleteDoc,
+  updateDoc,
   query,
   orderBy,
   where,
@@ -269,6 +270,57 @@ export async function getW2PayStub(id: string): Promise<W2PayStub | null> {
     createdAt: data.createdAt ?? '',
     createdBy: data.createdBy ?? '',
   };
+}
+
+export async function updateW2PayStub(
+  id: string,
+  data: CreateW2PayStubInput,
+): Promise<void> {
+  // Fetch all stubs for this employee EXCEPT the one being updated
+  const existingSnap = await getDocs(
+    query(collection(db, COLLECTION),
+      where('employeeId', '==', data.employeeId),
+      orderBy('checkDate', 'asc')
+    )
+  );
+  const existingRaw = existingSnap.docs
+    .filter(d => d.id !== id)
+    .map(d => ({ id: d.id, ...d.data() } as W2PayStub));
+
+  const tempId = '__updated__';
+  const pseudoStub: W2PayStub = {
+    id: tempId, ...data,
+    ytdGrossSalary: 0, ytdSocialSecurity: 0, ytdMedicare: 0,
+    ytdFederalIncomeTax: 0, ytdMoIncomeTax: 0, ytdMoStlouIncomeTax: 0,
+    totalWithholdings: 0, netPay: 0, ytdTotalWithholdings: 0, ytdNetPay: 0,
+    createdAt: '', createdBy: '',
+  };
+  const allSorted = [...existingRaw, pseudoStub].sort((a, b) =>
+    a.checkDate.localeCompare(b.checkDate)
+  );
+  const withYTD  = applyDynamicYTD(allSorted);
+  const computed = withYTD.find(s => s.id === tempId)!;
+
+  const totals = computeTotals({
+    ...data,
+    ytdGrossSalary:      computed.ytdGrossSalary,
+    ytdSocialSecurity:   computed.ytdSocialSecurity,
+    ytdMedicare:         computed.ytdMedicare,
+    ytdFederalIncomeTax: computed.ytdFederalIncomeTax,
+    ytdMoIncomeTax:      computed.ytdMoIncomeTax,
+    ytdMoStlouIncomeTax: computed.ytdMoStlouIncomeTax,
+  });
+
+  await updateDoc(doc(db, COLLECTION, id), {
+    ...data,
+    ytdGrossSalary:      computed.ytdGrossSalary,
+    ytdSocialSecurity:   computed.ytdSocialSecurity,
+    ytdMedicare:         computed.ytdMedicare,
+    ytdFederalIncomeTax: computed.ytdFederalIncomeTax,
+    ytdMoIncomeTax:      computed.ytdMoIncomeTax,
+    ytdMoStlouIncomeTax: computed.ytdMoStlouIncomeTax,
+    ...totals,
+  });
 }
 
 export async function deleteW2PayStub(id: string): Promise<void> {

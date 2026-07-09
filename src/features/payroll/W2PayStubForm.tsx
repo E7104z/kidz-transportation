@@ -6,7 +6,7 @@
 
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { createW2PayStub } from '../../services/w2PayStubService';
+import { createW2PayStub, updateW2PayStub } from '../../services/w2PayStubService';
 import { formatDollar } from '../../utils/pricing';
 import { computeTaxWithholdings } from '../../utils/taxes';
 import type { TaxInput } from '../../utils/taxes';
@@ -18,10 +18,12 @@ interface W2PayStubFormProps {
   onClose: () => void;
   onSaved: () => void;
   existingStubs?: W2PayStub[]; // all saved stubs — used to auto-derive YTD
+  stub?: W2PayStub;            // when provided, opens in edit mode
 }
 
-const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved, existingStubs = [] }) => {
+const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved, existingStubs = [], stub }) => {
   const { user } = useAuth();
+  const isEditMode = !!stub;
 
   // Personal & Check Information
   const [employeeName, setEmployeeName] = useState('Kara Noland');
@@ -91,6 +93,35 @@ const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved, e
   const overrideRef = useRef(false);
 
   const [saving, setSaving] = useState(false);
+
+  // ── Pre-fill fields when opened in edit mode ─────────────────────────────────
+  useEffect(() => {
+    if (!stub) return;
+    setEmployeeName(stub.employeeName);
+    setEmployeeAddress(stub.employeeAddress);
+    setEmployeeCity(stub.employeeCity);
+    setEmployeeState(stub.employeeState);
+    setEmployeeZip(stub.employeeZip);
+    setCompanyName(stub.companyName);
+    setCompanyAddress(stub.companyAddress);
+    setCompanyCity(stub.companyCity);
+    setCompanyState(stub.companyState);
+    setCompanyZip(stub.companyZip);
+    setCompanyPhone(stub.companyPhone);
+    setPayPeriodStart(stub.payPeriodStart);
+    setPayPeriodEnd(stub.payPeriodEnd);
+    setCheckDate(stub.checkDate);
+    setCheckNumber(stub.checkNumber);
+    setGrossSalary(stub.grossSalary);
+    setSocialSecurity(stub.socialSecurity);
+    setMedicare(stub.medicare);
+    setFederalIncomeTax(stub.federalIncomeTax);
+    setMoIncomeTax(stub.moIncomeTax);
+    setMoStlouIncomeTax(stub.moStlouIncomeTax);
+    // Keep loaded withholdings; let user reset to auto if they want
+    overrideRef.current = true;
+    setManualOverride(true);
+  }, [stub]);
 
   // ── Auto-calculate withholdings from gross salary ────────────────────────
 
@@ -162,40 +193,44 @@ const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved, e
     }
     setSaving(true);
     try {
-      await createW2PayStub(
-        {
-          employeeId: 'kara-noland',
-          employeeName,
-          employeeAddress,
-          employeeCity,
-          employeeState,
-          employeeZip,
-          companyName,
-          companyAddress,
-          companyCity,
-          companyState,
-          companyZip,
-          companyPhone,
-          payPeriodStart,
-          payPeriodEnd,
-          checkDate,
-          checkNumber,
-          grossSalary,
-          ytdGrossSalary:      computedYTD.ytdGrossSalary,
-          socialSecurity,
-          medicare,
-          federalIncomeTax,
-          moIncomeTax,
-          moStlouIncomeTax,
-          ytdSocialSecurity:   computedYTD.ytdSocialSecurity,
-          ytdMedicare:         computedYTD.ytdMedicare,
-          ytdFederalIncomeTax: computedYTD.ytdFederalIncomeTax,
-          ytdMoIncomeTax:      computedYTD.ytdMoIncomeTax,
-          ytdMoStlouIncomeTax: computedYTD.ytdMoStlouIncomeTax,
-        },
-        user.uid
-      );
-      toast.success('W-2 Pay Stub saved successfully.');
+      const payload = {
+        employeeId: 'kara-noland',
+        employeeName,
+        employeeAddress,
+        employeeCity,
+        employeeState,
+        employeeZip,
+        companyName,
+        companyAddress,
+        companyCity,
+        companyState,
+        companyZip,
+        companyPhone,
+        payPeriodStart,
+        payPeriodEnd,
+        checkDate,
+        checkNumber,
+        grossSalary,
+        ytdGrossSalary:      computedYTD.ytdGrossSalary,
+        socialSecurity,
+        medicare,
+        federalIncomeTax,
+        moIncomeTax,
+        moStlouIncomeTax,
+        ytdSocialSecurity:   computedYTD.ytdSocialSecurity,
+        ytdMedicare:         computedYTD.ytdMedicare,
+        ytdFederalIncomeTax: computedYTD.ytdFederalIncomeTax,
+        ytdMoIncomeTax:      computedYTD.ytdMoIncomeTax,
+        ytdMoStlouIncomeTax: computedYTD.ytdMoStlouIncomeTax,
+      };
+      if (isEditMode && stub) {
+        await updateW2PayStub(stub.id, payload);
+        toast.success('W-2 Pay Stub updated successfully.');
+      } else {
+        if (!user) { toast.error('You must be logged in.'); return; }
+        await createW2PayStub(payload, user.uid);
+        toast.success('W-2 Pay Stub saved successfully.');
+      }
       onSaved();
       onClose();
     } catch (err: any) {
@@ -247,7 +282,9 @@ const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved, e
         {/* Header */}
         <div className="flex items-center justify-between border-b px-6 py-4">
           <div>
-            <h2 className="text-xl font-bold text-gray-900">Create W-2 Pay Stub</h2>
+            <h2 className="text-xl font-bold text-gray-900">
+              {isEditMode ? 'Edit W-2 Pay Stub' : 'Create W-2 Pay Stub'}
+            </h2>
             <p className="text-xs text-gray-500 mt-0.5">
               Tax withholdings are auto-calculated from gross salary for St. Louis County, MO.
               {manualOverride && (
@@ -623,7 +660,7 @@ const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved, e
             disabled={saving}
             className="rounded-md bg-indigo-600 px-5 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
           >
-            {saving ? 'Saving...' : 'Save Pay Stub'}
+            {saving ? 'Saving...' : isEditMode ? 'Update Pay Stub' : 'Save Pay Stub'}
           </button>
         </div>
       </div>
