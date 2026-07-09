@@ -1355,6 +1355,7 @@ const Payroll: React.FC = () => {
           open={showW2Form}
           onSaved={handleW2Saved}
           onClose={() => setShowW2Form(false)}
+          existingStubs={w2Stubs}
         />
       )}
     </div>

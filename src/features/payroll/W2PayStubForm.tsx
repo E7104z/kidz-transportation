@@ -10,15 +10,17 @@ import { createW2PayStub } from '../../services/w2PayStubService';
 import { formatDollar } from '../../utils/pricing';
 import { computeTaxWithholdings } from '../../utils/taxes';
 import type { TaxInput } from '../../utils/taxes';
+import type { W2PayStub } from '../../types';
 import toast from 'react-hot-toast';
 
 interface W2PayStubFormProps {
   open: boolean;
   onClose: () => void;
   onSaved: () => void;
+  existingStubs?: W2PayStub[]; // all saved stubs — used to auto-derive YTD
 }
 
-const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved }) => {
+const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved, existingStubs = [] }) => {
   const { user } = useAuth();
 
   // Personal & Check Information
@@ -44,7 +46,6 @@ const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved })
 
   // Earnings
   const [grossSalary, setGrossSalary] = useState<number>(0);
-  const [ytdGrossSalary, setYtdGrossSalary] = useState<number>(0);
 
   // Withholdings — initialized by auto-calculation, editable by user
   const [socialSecurity, setSocialSecurity] = useState<number>(0);
@@ -53,12 +54,36 @@ const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved })
   const [moIncomeTax, setMoIncomeTax] = useState<number>(0);
   const [moStlouIncomeTax, setMoStlouIncomeTax] = useState<number>(0);
 
-  // YTD Withholdings
-  const [ytdSocialSecurity, setYtdSocialSecurity] = useState<number>(0);
-  const [ytdMedicare, setYtdMedicare] = useState<number>(0);
-  const [ytdFederalIncomeTax, setYtdFederalIncomeTax] = useState<number>(0);
-  const [ytdMoIncomeTax, setYtdMoIncomeTax] = useState<number>(0);
-  const [ytdMoStlouIncomeTax, setYtdMoStlouIncomeTax] = useState<number>(0);
+  // ── Prior YTD from existing stubs ───────────────────────────────────────
+  // Sum of all saved stubs for the same employee in the same calendar year
+  // with a checkDate strictly BEFORE the current checkDate.
+  const priorYTD = useMemo(() => {
+    const zero = { grossSalary: 0, socialSecurity: 0, medicare: 0, federalIncomeTax: 0, moIncomeTax: 0, moStlouIncomeTax: 0 };
+    if (!checkDate || !existingStubs.length) return zero;
+    const year = checkDate.slice(0, 4);
+    const prior = existingStubs.filter(
+      s => s.checkDate.slice(0, 4) === year && s.checkDate < checkDate
+    );
+    if (!prior.length) return zero;
+    return {
+      grossSalary:      prior.reduce((sum, s) => sum + (s.grossSalary || 0), 0),
+      socialSecurity:   prior.reduce((sum, s) => sum + (s.socialSecurity || 0), 0),
+      medicare:         prior.reduce((sum, s) => sum + (s.medicare || 0), 0),
+      federalIncomeTax: prior.reduce((sum, s) => sum + (s.federalIncomeTax || 0), 0),
+      moIncomeTax:      prior.reduce((sum, s) => sum + (s.moIncomeTax || 0), 0),
+      moStlouIncomeTax: prior.reduce((sum, s) => sum + (s.moStlouIncomeTax || 0), 0),
+    };
+  }, [checkDate, existingStubs]);
+
+  // YTD = prior stubs + this period (updates automatically as user types)
+  const computedYTD = useMemo(() => ({
+    ytdGrossSalary:      priorYTD.grossSalary      + grossSalary,
+    ytdSocialSecurity:   priorYTD.socialSecurity   + socialSecurity,
+    ytdMedicare:         priorYTD.medicare         + medicare,
+    ytdFederalIncomeTax: priorYTD.federalIncomeTax + federalIncomeTax,
+    ytdMoIncomeTax:      priorYTD.moIncomeTax      + moIncomeTax,
+    ytdMoStlouIncomeTax: priorYTD.moStlouIncomeTax + moStlouIncomeTax,
+  }), [priorYTD, grossSalary, socialSecurity, medicare, federalIncomeTax, moIncomeTax, moStlouIncomeTax]);
 
   // Tracks whether the user has manually edited any withholding field.
   // When true, auto-calculation is disabled for that field.
@@ -72,11 +97,11 @@ const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved })
   const taxInput: TaxInput = useMemo(
     () => ({
       grossSalary,
-      ytdGrossSalary: ytdGrossSalary || grossSalary,
+      ytdGrossSalary: computedYTD.ytdGrossSalary, // use actual YTD for SS wage-cap calculation
       filingStatus,
       payPeriodsPerYear,
     }),
-    [grossSalary, ytdGrossSalary, filingStatus, payPeriodsPerYear],
+    [grossSalary, computedYTD.ytdGrossSalary, filingStatus, payPeriodsPerYear],
   );
 
   const computedTaxes = useMemo(
@@ -94,11 +119,6 @@ const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved })
         setFederalIncomeTax(0);
         setMoIncomeTax(0);
         setMoStlouIncomeTax(0);
-        setYtdSocialSecurity(0);
-        setYtdMedicare(0);
-        setYtdFederalIncomeTax(0);
-        setYtdMoIncomeTax(0);
-        setYtdMoStlouIncomeTax(0);
       }
       return;
     }
@@ -109,12 +129,7 @@ const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved })
     setFederalIncomeTax(computedTaxes.federalIncomeTax);
     setMoIncomeTax(computedTaxes.moIncomeTax);
     setMoStlouIncomeTax(computedTaxes.moStlouIncomeTax);
-    setYtdSocialSecurity(computedTaxes.ytdSocialSecurity);
-    setYtdMedicare(computedTaxes.ytdMedicare);
-    setYtdFederalIncomeTax(computedTaxes.ytdFederalIncomeTax);
-    setYtdMoIncomeTax(computedTaxes.ytdMoIncomeTax);
-    setYtdMoStlouIncomeTax(computedTaxes.ytdMoStlouIncomeTax);
-  }, [grossSalary, ytdGrossSalary, computedTaxes]);
+  }, [grossSalary, computedTaxes]);
 
   // ── Computed totals ──────────────────────────────────────────────────────
 
@@ -123,8 +138,9 @@ const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved })
   const netPay = grossSalary - totalWithholdings;
 
   const ytdTotalWithholdings =
-    ytdSocialSecurity + ytdMedicare + ytdFederalIncomeTax + ytdMoIncomeTax + ytdMoStlouIncomeTax;
-  const ytdNetPay = (ytdGrossSalary || grossSalary) - ytdTotalWithholdings;
+    computedYTD.ytdSocialSecurity + computedYTD.ytdMedicare +
+    computedYTD.ytdFederalIncomeTax + computedYTD.ytdMoIncomeTax + computedYTD.ytdMoStlouIncomeTax;
+  const ytdNetPay = computedYTD.ytdGrossSalary - ytdTotalWithholdings;
 
   // ── Handler to mark manual override ──────────────────────────────────────
 
@@ -165,17 +181,17 @@ const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved })
           checkDate,
           checkNumber,
           grossSalary,
-          ytdGrossSalary: ytdGrossSalary || grossSalary,
+          ytdGrossSalary:      computedYTD.ytdGrossSalary,
           socialSecurity,
           medicare,
           federalIncomeTax,
           moIncomeTax,
           moStlouIncomeTax,
-          ytdSocialSecurity,
-          ytdMedicare,
-          ytdFederalIncomeTax,
-          ytdMoIncomeTax,
-          ytdMoStlouIncomeTax,
+          ytdSocialSecurity:   computedYTD.ytdSocialSecurity,
+          ytdMedicare:         computedYTD.ytdMedicare,
+          ytdFederalIncomeTax: computedYTD.ytdFederalIncomeTax,
+          ytdMoIncomeTax:      computedYTD.ytdMoIncomeTax,
+          ytdMoStlouIncomeTax: computedYTD.ytdMoStlouIncomeTax,
         },
         user.uid
       );
@@ -205,17 +221,12 @@ const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved })
     checkDate,
     checkNumber,
     grossSalary,
-    ytdGrossSalary,
+    computedYTD,
     socialSecurity,
     medicare,
     federalIncomeTax,
     moIncomeTax,
     moStlouIncomeTax,
-    ytdSocialSecurity,
-    ytdMedicare,
-    ytdFederalIncomeTax,
-    ytdMoIncomeTax,
-    ytdMoStlouIncomeTax,
     onSaved,
     onClose,
   ]);
@@ -469,15 +480,13 @@ const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved })
                 />
               </div>
               <div>
-                <label className={labelClass}>YTD Gross Salary</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  className={inputClass}
-                  value={ytdGrossSalary || ''}
-                  onChange={(e) => setYtdGrossSalary(parseFloat(e.target.value) || 0)}
-                />
+                <label className={labelClass}>YTD Gross Salary <span className="text-green-600 text-xs font-normal">(auto)</span></label>
+                <div className={readOnlyClass}>{formatDollar(computedYTD.ytdGrossSalary)}</div>
+                {priorYTD.grossSalary > 0 && (
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Prior stubs: {formatDollar(priorYTD.grossSalary)} + this period
+                  </p>
+                )}
               </div>
             </div>
 
@@ -504,151 +513,71 @@ const W2PayStubForm: React.FC<W2PayStubFormProps> = ({ open, onClose, onSaved })
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={labelClass}>Social Security</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
+                  <input type="number" step="0.01" min="0"
                     className={manualOverride ? inputClass : autoFieldClass}
                     value={socialSecurity || ''}
-                    onChange={(e) => {
-                      markManual();
-                      setSocialSecurity(parseFloat(e.target.value) || 0);
-                    }}
+                    onChange={(e) => { markManual(); setSocialSecurity(parseFloat(e.target.value) || 0); }}
                   />
                 </div>
                 <div>
-                  <label className={labelClass}>YTD Social Security</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    className={manualOverride ? inputClass : autoFieldClass}
-                    value={ytdSocialSecurity || ''}
-                    onChange={(e) => {
-                      markManual();
-                      setYtdSocialSecurity(parseFloat(e.target.value) || 0);
-                    }}
-                  />
+                  <label className={labelClass}>YTD Social Security <span className="text-green-600 text-xs font-normal">(auto)</span></label>
+                  <div className={readOnlyClass}>{formatDollar(computedYTD.ytdSocialSecurity)}</div>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={labelClass}>Medicare</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
+                  <input type="number" step="0.01" min="0"
                     className={manualOverride ? inputClass : autoFieldClass}
                     value={medicare || ''}
-                    onChange={(e) => {
-                      markManual();
-                      setMedicare(parseFloat(e.target.value) || 0);
-                    }}
+                    onChange={(e) => { markManual(); setMedicare(parseFloat(e.target.value) || 0); }}
                   />
                 </div>
                 <div>
-                  <label className={labelClass}>YTD Medicare</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    className={manualOverride ? inputClass : autoFieldClass}
-                    value={ytdMedicare || ''}
-                    onChange={(e) => {
-                      markManual();
-                      setYtdMedicare(parseFloat(e.target.value) || 0);
-                    }}
-                  />
+                  <label className={labelClass}>YTD Medicare <span className="text-green-600 text-xs font-normal">(auto)</span></label>
+                  <div className={readOnlyClass}>{formatDollar(computedYTD.ytdMedicare)}</div>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={labelClass}>Federal Income Tax</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
+                  <input type="number" step="0.01" min="0"
                     className={manualOverride ? inputClass : autoFieldClass}
                     value={federalIncomeTax || ''}
-                    onChange={(e) => {
-                      markManual();
-                      setFederalIncomeTax(parseFloat(e.target.value) || 0);
-                    }}
+                    onChange={(e) => { markManual(); setFederalIncomeTax(parseFloat(e.target.value) || 0); }}
                   />
                 </div>
                 <div>
-                  <label className={labelClass}>YTD Federal Income Tax</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    className={manualOverride ? inputClass : autoFieldClass}
-                    value={ytdFederalIncomeTax || ''}
-                    onChange={(e) => {
-                      markManual();
-                      setYtdFederalIncomeTax(parseFloat(e.target.value) || 0);
-                    }}
-                  />
+                  <label className={labelClass}>YTD Federal Income Tax <span className="text-green-600 text-xs font-normal">(auto)</span></label>
+                  <div className={readOnlyClass}>{formatDollar(computedYTD.ytdFederalIncomeTax)}</div>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={labelClass}>MO Income Tax</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
+                  <input type="number" step="0.01" min="0"
                     className={manualOverride ? inputClass : autoFieldClass}
                     value={moIncomeTax || ''}
-                    onChange={(e) => {
-                      markManual();
-                      setMoIncomeTax(parseFloat(e.target.value) || 0);
-                    }}
+                    onChange={(e) => { markManual(); setMoIncomeTax(parseFloat(e.target.value) || 0); }}
                   />
                 </div>
                 <div>
-                  <label className={labelClass}>YTD MO Income Tax</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    className={manualOverride ? inputClass : autoFieldClass}
-                    value={ytdMoIncomeTax || ''}
-                    onChange={(e) => {
-                      markManual();
-                      setYtdMoIncomeTax(parseFloat(e.target.value) || 0);
-                    }}
-                  />
+                  <label className={labelClass}>YTD MO Income Tax <span className="text-green-600 text-xs font-normal">(auto)</span></label>
+                  <div className={readOnlyClass}>{formatDollar(computedYTD.ytdMoIncomeTax)}</div>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={labelClass}>MO STLOU Income Tax (0% for County)</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
+                  <input type="number" step="0.01" min="0"
                     className={manualOverride ? inputClass : autoFieldClass}
                     value={moStlouIncomeTax || ''}
-                    onChange={(e) => {
-                      markManual();
-                      setMoStlouIncomeTax(parseFloat(e.target.value) || 0);
-                    }}
+                    onChange={(e) => { markManual(); setMoStlouIncomeTax(parseFloat(e.target.value) || 0); }}
                   />
                 </div>
                 <div>
-                  <label className={labelClass}>YTD MO STLOU Income Tax</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    className={manualOverride ? inputClass : autoFieldClass}
-                    value={ytdMoStlouIncomeTax || ''}
-                    onChange={(e) => {
-                      markManual();
-                      setYtdMoStlouIncomeTax(parseFloat(e.target.value) || 0);
-                    }}
-                  />
+                  <label className={labelClass}>YTD MO STLOU Income Tax <span className="text-green-600 text-xs font-normal">(auto)</span></label>
+                  <div className={readOnlyClass}>{formatDollar(computedYTD.ytdMoStlouIncomeTax)}</div>
                 </div>
               </div>
             </div>
